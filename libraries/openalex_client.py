@@ -1,4 +1,4 @@
-import polars as pl 
+import pandas as pd 
 from datetime import datetime, timedelta
 import asyncio 
 import aiohttp
@@ -37,7 +37,7 @@ class OpenAlexClient:
     def _build_url(self, topic_id: str, start_date: str, end_date: str, cursor: str = '*'):
         """Build URL with email parameter for polite pool"""
         return (f"https://api.openalex.org/works?"
-                f"select=id,ids,title,abstract_inverted_index&"
+                f"select=id,ids,title,abstract_inverted_index,publication_date&"
                 f"filter=primary_topic.id:{topic_id},"
                 f"type:article|review,"
                 f"from_publication_date:{start_date},"
@@ -68,6 +68,7 @@ class OpenAlexClient:
                         if response.status == 200:
                             data = await response.json()
                             cursor = data['meta'].get('next_cursor')
+                            #get total count from api 
                             results.extend(data['results'])
                             retry_count = 0
                             
@@ -151,7 +152,7 @@ class OpenAlexClient:
                                     end_date=date_range['end'])
                 await self.task_queue.put((date_range, url))
                 
-            all_results = []
+             
 
             completed_tasks = 0 
             task_count = self.task_queue.qsize()
@@ -161,14 +162,16 @@ class OpenAlexClient:
                 asyncio.create_task(self._worker_task()) for _ in range(self.max_concurrent_requests)
             ]
 
+            all_results = list()
             while completed_tasks < task_count: 
                 try: 
                     results = await self.result_queue.get() 
                     if results: 
-
+                        #results is a tuple of (date_range (dict), results (list of dictionaries))
+                        all_results.append(results) 
                         completed_tasks += 1
                         print(f'Completed {completed_tasks} of {task_count} tasks')
-                        all_results.extend(results)
+
                     self.result_queue.task_done()
                 except Exception as e: 
                     print(f'Error processing results: {e}')
@@ -176,11 +179,54 @@ class OpenAlexClient:
             for task in worker_tasks: 
                 task.cancel()
             
-            await asyncio.gather(*worker_tasks) 
-            return pl.DataFrame(all_results) if all_results else pl.DataFrame()
+            await asyncio.gather(*worker_tasks)
+            
+            #all_results is a list of tuples (date_range (dict), results (list of dictionaries)), need to be converted to a dataframe. Note that publicaton date is ISO 8601 format 
+            if all_results: 
+                print('Processing Results')
+                all_results_df = pd.DataFrame()
+                #unpack list of tuples
+                for date_range, result_json in all_results: 
+                    start_date = pd.to_datetime(date_range['start'], format = 'ISO8601')
+                    end_date = pd.to_datetime(date_range['end'], format = 'ISO8601')
+                    
+                    # Convert list of JSON objects to DataFrame using json_normalize
+                    results_df = pd.DataFrame(result_json)
+
+                    # Convert dates
+                    if 'publication_date' in results_df.columns:
+                        results_df['publication_date'] = pd.to_datetime(results_df['publication_date'], format='ISO8601')
+                    
+                    results_df['retrieved_startdate'] = start_date
+                    results_df['retrieved_enddate'] = end_date
+                    results_df['retrieved_daterange'] = f'{start_date} - {end_date}'
+                    
+                    all_results_df = pd.concat([all_results_df, results_df], ignore_index=True)
+
+                #unpack nested json columns (ids, and abstract inverted indices)
+                id_df = pd.json_normalize(all_results_df['ids'])
+                all_results_df = pd.concat([all_results_df, id_df], axis=1)
+                all_results_df.drop(columns = 'ids', inplace=True)
+
+                # Vectorized abstract decoding using numpy arrays for better performance
+                mask = ~all_results_df['abstract_inverted_index'].isna()  # Create boolean mask for non-null abstracts
+                all_results_df['abstract'] = None  # Initialize abstract column with None values
+                if mask.any():  # Only process if there are any non-null abstracts
+                    abstracts = all_results_df.loc[mask, 'abstract_inverted_index'].map(
+                        lambda x: ' '.join(k for k, _ in sorted(
+                            [(word, pos[0]) for word, pos in x.items() for _ in pos],
+                            key=lambda x: x[1]
+                        ))
+                    )
+                    all_results_df.loc[mask, 'abstract'] = abstracts
+
+                all_results_df.drop(columns = 'abstract_inverted_index', inplace=True)
+                return all_results_df   
+
+            else: 
+                return pd.DataFrame()
         
         finally: 
             if self.session: 
                 await self.session.close()
                 self.session = None
-

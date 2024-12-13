@@ -1,7 +1,7 @@
 import polars as pl 
 from datetime import datetime, timedelta
 
-def date_range_generator(start_date = '1990-01-01', end_date = '2022-09-30'):
+def date_range_generator(start_date = '1960-01-01', end_date = '2022-09-30'):
     '''
     Generate a list of non-overlapping date ranges, one year apart
 
