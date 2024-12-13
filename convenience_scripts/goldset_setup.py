@@ -12,6 +12,8 @@ fullgroundtruth_valid_apimerge_df['year_pub_extract'] = pd.to_numeric(
     errors='coerce'
 ).astype('Int64')  
 
+fullgroundtruth_valid_apimerge_df.reset_index(inplace = True)
+
 #firstly for sr updates
 _srupdate = fullgroundtruth_valid_apimerge_df.query('sr_update == "Y"').copy()
 _newsr = fullgroundtruth_valid_apimerge_df.query('sr_update != "Y"').copy()
