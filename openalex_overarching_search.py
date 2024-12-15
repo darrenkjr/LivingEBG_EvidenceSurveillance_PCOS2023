@@ -12,7 +12,7 @@ from pathlib import Path
 async def main(): 
     async with OpenAlexClient() as oa_client: 
         #generate topic ids 
-        topic_id_list = generate_openalex_topicsearch_id(topic_id_list)
+        topic_id_list = generate_openalex_topicsearch_id()
 
         #results path 
         current_dir = Path(__file__).parent
