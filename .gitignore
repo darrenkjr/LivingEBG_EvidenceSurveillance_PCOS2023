@@ -30,3 +30,6 @@ Thumbs.db
 *.ris
 debug_results/
 manuscript/
+
+#temporary as this is a big set file 
+search_results/ 
