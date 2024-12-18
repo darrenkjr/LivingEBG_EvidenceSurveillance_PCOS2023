@@ -7,12 +7,11 @@ import dotenv
 import os 
 from libraries.convenience_func import date_range_generator
 from urllib.parse import urlparse, parse_qsl, urlencode
-import random 
 
 class OpenAlexClient:
-    def __init__(self, max_concurrent_requests: int = 10, max_retries: int = 5):
+
+    def __init__(self, max_concurrent_requests: int = 5, max_retries: int = 5):
         """Initialize client with rate limiting queue"""
-        dotenv.load_dotenv()
         self.email = os.getenv('email')
         self.request_semaphore = asyncio.Semaphore(max_concurrent_requests)
         self.result_queue = asyncio.Queue()
@@ -34,7 +33,7 @@ class OpenAlexClient:
             await self.session.close()
             self.session = None
 
-    def _build_url(self, topic_id: str, start_date: str, end_date: str, cursor: str = '*'):
+    def _build_topicsearch_url(self, topic_id: str, start_date: str, end_date: str, cursor: str = '*'):
         """Build URL with email parameter for polite pool"""
         return (f"https://api.openalex.org/works?"
                 f"select=id,ids,title,abstract_inverted_index,publication_date&"
@@ -45,6 +44,72 @@ class OpenAlexClient:
                 f"per-page=200&"
                 f"cursor={cursor}&"
                 f"mailto={self.email}")
+    
+    def _build_oa_topics_url(self, id_list:list): 
+        '''
+        Build OA api URL for each OA id chunk in list 
+        '''
+        id_chunk = '|'.join(id_list)
+        return f'https://api.openalex.org/works?filter=ids.openalex:{id_chunk}&select=id,title,primary_topic,primary_location&per-page=200&mailto={self.email}'
+
+        
+    async def retrieve_oa_data(self, oa_ids): 
+        '''
+        Retrieve topics for each oa id in the oa gold set df 
+        '''
+
+        #take the od_ids series and split into chunks of 50
+        if isinstance(oa_ids, pd.Series): 
+            oa_ids_list = oa_ids.tolist()
+        else: 
+            oa_ids_list = oa_ids
+        oa_ids_chunks = [oa_ids_list[i:i+100] for i in range(0, len(oa_ids_list), 100)]
+        #build url for each chunk
+
+       #start session if not already started 
+        if not self.session: 
+            self.session = aiohttp.ClientSession()
+
+        #retrieve data for each url, 1 task per url / chunk 
+        for chunk in oa_ids_chunks: 
+            url = self._build_oa_topics_url(chunk)
+            await self.task_queue.put((chunk, url))
+
+        completed_tasks = 0 
+        task_count = self.task_queue.qsize()
+        print(f'Starting with {task_count} tasks')
+
+        worker_tasks = [
+            asyncio.create_task(self._worker_task()) for _ in range(self.max_concurrent_requests)
+        ]
+
+        all_results = list()
+        while completed_tasks < task_count: 
+            try: 
+                results = await self.result_queue.get() 
+                if results: 
+                    #results is a tuple of (date_range (dict), results (list of dictionaries))
+                    all_results.append(results) 
+                    completed_tasks += 1
+                    print(f'Completed {completed_tasks} of {task_count} tasks')
+
+                self.result_queue.task_done()
+            except Exception as e: 
+                print(f'Error processing results: {e}')
+
+        for task in worker_tasks: 
+            task.cancel()
+        
+        await asyncio.gather(*worker_tasks)
+
+        if all_results: 
+            all_results_df = pd.DataFrame()
+            for url_chunk, api_results in all_results: 
+                all_results_df = pd.concat([all_results_df, pd.DataFrame(api_results)], ignore_index=True)
+            return pd.DataFrame(all_results_df)
+        else: 
+            return pd.DataFrame()
+
     
 
     async def retrieve_data(self, url: str) -> List[Dict]:
@@ -63,7 +128,6 @@ class OpenAlexClient:
                         query_params['cursor'] = cursor
                     new_query = urlencode(query_params)
                     current_url = parsed_url._replace(query=new_query).geturl()
-                    
                     async with self.session.get(current_url) as response:
                         if response.status == 200:
                             data = await response.json()
@@ -123,7 +187,7 @@ class OpenAlexClient:
                     if results: 
                         await self.result_queue.put((date_range, results))
                         remaining = self.task_queue.qsize()
-                        print('Task completed for date range: ', date_range)
+                        print('Task completed.')
                         print('Status: ', f'{remaining} tasks remaining')
 
                 except Exception as e: 
@@ -139,7 +203,7 @@ class OpenAlexClient:
                 break
 
 
-    async def get_paginated_results(self, topic_id: str):
+    async def get_overarching_paginated_search_results(self, topic_id: str):
         """Process date ranges with controlled concurrency"""
         if not self.session:
             self.session = aiohttp.ClientSession()
@@ -147,7 +211,7 @@ class OpenAlexClient:
         try:
             
             for date_range in self.date_list:
-                url = self._build_url(topic_id, 
+                url = self._build_topicsearch_url(topic_id, 
                                     start_date=date_range['start'],
                                     end_date=date_range['end'])
                 await self.task_queue.put((date_range, url))
@@ -230,3 +294,7 @@ class OpenAlexClient:
             if self.session: 
                 await self.session.close()
                 self.session = None
+
+    def validate_results(self, results_df: pd.DataFrame, topic_id: str): 
+        #run quick request - grap header results, validate against results df 
+        assert len(results_df) == len(results_df['id'].unique()), 'Number of results does not match number of unique ids'

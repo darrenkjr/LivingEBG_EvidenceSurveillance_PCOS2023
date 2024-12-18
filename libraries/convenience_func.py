@@ -1,7 +1,8 @@
-import polars as pl 
+import pandas as pd 
 from datetime import datetime, timedelta
 
-def date_range_generator(start_date = '1960-01-01', end_date = '2022-09-30'):
+
+def date_range_generator(start_date = '1950-01-01', end_date = '2022-12-31', interval_years = 2):
     '''
     Generate a list of non-overlapping date ranges, one year apart
 
@@ -19,7 +20,7 @@ def date_range_generator(start_date = '1960-01-01', end_date = '2022-09-30'):
     while current_date < end:
         # Calculate the end of this range (either next year - 1 day, or the final end date)
         range_end = min(
-            datetime(current_date.year + 1, current_date.month, current_date.day),
+            datetime(current_date.year + interval_years, current_date.month, current_date.day) - timedelta(days=1),
             end
         )
         
@@ -29,5 +30,7 @@ def date_range_generator(start_date = '1960-01-01', end_date = '2022-09-30'):
         })
         
         # Move to start of next range
-        current_date = range_end
+        current_date = range_end + timedelta(days=1)
+        
     return date_ranges
+
