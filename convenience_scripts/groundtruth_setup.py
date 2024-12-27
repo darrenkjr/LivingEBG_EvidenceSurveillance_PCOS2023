@@ -1,7 +1,9 @@
 import pandas as pd 
 from pathlib import Path
-from cleanhtmltags import clean_html_tags
-
+import sys
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
+from libraries.convenience_func import ConvenienceFunc
 
 def groundtruth_setup():    
     #defining file and dataset directories 
@@ -108,11 +110,12 @@ def groundtruth_setup():
     print(f"Total rows with either missing: {fullgroundtruth_valid_apimerge_df[['title', 'abstract']].isna().any(axis=1).sum()}")
 
     #clean up html tags and other weird artefacts 
-    fullgroundtruth_valid_apimerge_df['title'] = fullgroundtruth_valid_apimerge_df['title'].apply(lambda x: clean_html_tags(x) if pd.notna(x) else x)
-    fullgroundtruth_valid_apimerge_df['abstract'] = fullgroundtruth_valid_apimerge_df['abstract'].apply(lambda x: clean_html_tags(x) if pd.notna(x) else x)
+    
+    fullgroundtruth_valid_apimerge_df['title'] = fullgroundtruth_valid_apimerge_df['title'].apply(lambda x: ConvenienceFunc().clean_html_tags(x) if pd.notna(x) else x)
+    fullgroundtruth_valid_apimerge_df['abstract'] = fullgroundtruth_valid_apimerge_df['abstract'].apply(lambda x: ConvenienceFunc().clean_html_tags(x) if pd.notna(x) else x)
 
     #save for later use (evaluation)
-    fullgroundtruth_valid_apimerge_df.to_excel(output_dir / 'fullgroundtruth_valid_apimerge_df.xlsx', index=False)
+    fullgroundtruth_valid_apimerge_df.to_excel(output_dir / 'fullgroundtruth_valid_apimerge_df.xlsx', index=False)hg
     #also save as parquet to preserve data types 
     fullgroundtruth_valid_apimerge_df.to_parquet(output_dir / 'fullgroundtruth_valid_apimerge_df.parquet')
     return fullgroundtruth_valid_apimerge_df
