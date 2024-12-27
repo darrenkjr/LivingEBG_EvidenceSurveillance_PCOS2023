@@ -48,7 +48,7 @@ def groundtruth_setup():
     embase_groundtruth_df = pd.read_excel(apiretrieved_groundtruth_path, 
                                         sheet_name="api_results_embase", 
                                         engine='openpyxl', 
-                                        dtype={'included_article_id': str})
+                                        dtype={'included_article_id': str, 'api_id_retrieved' : str})
     print("Missing values before fillna:")
     print(embase_groundtruth_df[['primary_title', 'notes_abstract']].isna().sum())
     embase_groundtruth_df['primary_title'] = embase_groundtruth_df['primary_title'].fillna(embase_groundtruth_df['title_2ndsearch'])
@@ -59,7 +59,7 @@ def groundtruth_setup():
     pmed_groundtruth_df = pd.read_excel(apiretrieved_groundtruth_path, 
                                     sheet_name="api_results_pubmed", 
                                     engine='openpyxl', 
-                                    dtype={'included_article_id': str})
+                                    dtype={'included_article_id': str, 'api_id_retrieved' : str})
 
     # Fix: Fill each column separately
     pmed_groundtruth_df['title'] = pmed_groundtruth_df['title'].fillna(pmed_groundtruth_df['title_2ndsearch'])
@@ -77,12 +77,12 @@ def groundtruth_setup():
     fullgroundtruth_valid_apimerge_df['retrieved_embase_id'] = fullgroundtruth_valid_df.join(
         embase_groundtruth_df.set_index('included_article_id')['api_id_retrieved'],
         on='included_article_id'
-    )['api_id_retrieved']
+    )['api_id_retrieved'].apply(lambda x: str(x) if pd.notna(x) else pd.NA) #make sure this is a string
     #pubmed id 
     fullgroundtruth_valid_apimerge_df['retrieved_pubmed_id'] = fullgroundtruth_valid_df.join(
         pmed_groundtruth_df.set_index('included_article_id')['api_id_retrieved'],
         on='included_article_id'
-    )['api_id_retrieved']
+    )['api_id_retrieved'].apply(lambda x: str(x) if pd.notna(x) else pd.NA)
 
     #fill in title and abstract 
     # Initialize title and abstract columns as empty

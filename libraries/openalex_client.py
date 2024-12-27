@@ -4,22 +4,25 @@ import asyncio
 import aiohttp
 from typing import List, Dict
 import dotenv
+dotenv.load_dotenv()
 import os 
-from libraries.convenience_func import date_range_generator
+from libraries.convenience_func import ConvenienceFunc
 from urllib.parse import urlparse, parse_qsl, urlencode
-
 class OpenAlexClient:
 
-    def __init__(self, max_concurrent_requests: int = 5, max_retries: int = 5):
+    def __init__(self, max_concurrent_requests: int = 3, max_retries: int = 4, logger = None):
         """Initialize client with rate limiting queue"""
+        self.logger = logger
         self.email = os.getenv('email')
         self.request_semaphore = asyncio.Semaphore(max_concurrent_requests)
         self.result_queue = asyncio.Queue()
         self.max_retries = max_retries
-        self.date_list = date_range_generator()
+        self.date_list = ConvenienceFunc(logger=logger).date_range_generator()
         self.session = None
         self.task_queue = asyncio.Queue()
         self.max_concurrent_requests = max_concurrent_requests
+        self.logger.info(f'Initializing OpenAlexClient with following params: Email: {self.email}, Max concurrent requests: {self.max_concurrent_requests}, Max retries: {self.max_retries}')
+        
 
     async def __aenter__(self):
         """Async context manager entry"""
@@ -59,6 +62,8 @@ class OpenAlexClient:
         '''
 
         #take the od_ids series and split into chunks of 50
+        self.logger.info(f'Retrieving OA data for {len(oa_ids)} ids')
+
         if isinstance(oa_ids, pd.Series): 
             oa_ids_list = oa_ids.tolist()
         else: 
@@ -77,7 +82,7 @@ class OpenAlexClient:
 
         completed_tasks = 0 
         task_count = self.task_queue.qsize()
-        print(f'Starting with {task_count} tasks')
+        self.logger.info(f'Starting task queue for OA retrieval. {task_count} tasks to complete.')
 
         worker_tasks = [
             asyncio.create_task(self._worker_task()) for _ in range(self.max_concurrent_requests)
@@ -91,11 +96,11 @@ class OpenAlexClient:
                     #results is a tuple of (date_range (dict), results (list of dictionaries))
                     all_results.append(results) 
                     completed_tasks += 1
-                    print(f'Completed {completed_tasks} of {task_count} tasks')
+                    self.logger.info(f'Completed {completed_tasks} of {task_count} tasks')
 
                 self.result_queue.task_done()
             except Exception as e: 
-                print(f'Error processing results: {e}')
+                self.logger.error(f'Error processing results: {e}')
 
         for task in worker_tasks: 
             task.cancel()
@@ -104,6 +109,7 @@ class OpenAlexClient:
 
         if all_results: 
             all_results_df = pd.DataFrame()
+            self.logger.info('Processing OA results')
             for url_chunk, api_results in all_results: 
                 all_results_df = pd.concat([all_results_df, pd.DataFrame(api_results)], ignore_index=True)
             return pd.DataFrame(all_results_df)
@@ -137,11 +143,13 @@ class OpenAlexClient:
                             retry_count = 0
                             
                             if cursor is None:
-                                print('Reached end of pagination')
+                                self.logger.info('Reached end of pagination')
                                 break
                                 
                         elif response.status == 429:  # Rate limit hit
-                            print('Rate limit exceeded - waiting...')
+                            self.logger.warning(f'Rate limit exceeded for {current_url} - waiting...')
+                            url_filter = query_params['filter']
+                            self.logger.warning(f'Filter params for reference: {url_filter}')
                             retry_after = int(response.headers.get('Retry-After', '5'))
                             await asyncio.sleep(retry_after)
                             continue
@@ -151,14 +159,31 @@ class OpenAlexClient:
                             
                     # Rate limiting delay
                     await asyncio.sleep(0.1)
-                    
-                except Exception as e:
-                    print(f'Error retrieving data: {str(e)}')
+                
+
+                except aiohttp.ClientError as ce:
+                    self.logger.error(f'Network/HTTP Error: {str(ce)}, current url: {current_url}')
+                    url_filter = query_params['filter']
+                    self.logger.error(f'Filter params for reference: {url_filter}')
                     retry_count += 1
-                    if retry_count >= self.max_retries:
-                        break
-                    await asyncio.sleep(2 ** retry_count)
-                    continue
+                except Exception as e:
+                    self.logger.error(f'Unexpected Error: {str(e)}, current url: {current_url}')
+                    url_filter = query_params['filter']
+                    self.logger.error(f'Filter params for reference: {url_filter}')
+                    retry_count += 1
+
+                if retry_count >= self.max_retries:
+                    self.logger.warning(f'Max retries ({self.max_retries}) reached for {current_url}. Stopping.')
+                    self.logger.error(f'Filter params for reference: {url_filter}')
+                    break
+                elif retry_count > 0:
+                    wait_time = 2 ** retry_count
+                    self.logger.warning(f'Retrying {current_url} in {wait_time} seconds...')
+                    url_filter = query_params['filter']
+                    self.warning(f'Filter params for reference: {url_filter}')
+                    await asyncio.sleep(wait_time)
+                    continue 
+                
                     
         return results
     
@@ -178,7 +203,7 @@ class OpenAlexClient:
                     date_range, url = await asyncio.wait_for(self.task_queue.get(), timeout=60)
 
                 except asyncio.TimeoutError: 
-                    print('Timeout waiting for task - skipping')
+                    self.logger.warning('Timeout waiting for task - skipping')
                     break
                 
                 try: 
@@ -187,11 +212,11 @@ class OpenAlexClient:
                     if results: 
                         await self.result_queue.put((date_range, results))
                         remaining = self.task_queue.qsize()
-                        print('Task completed.')
-                        print('Status: ', f'{remaining} tasks remaining')
+                        self.logger.info('Task completed.')
+                        self.logger.info(f'Status: {remaining} tasks remaining')
 
                 except Exception as e: 
-                    print(f'Error processing task: {e}')
+                    self.logger.error(f'Error processing task: {str(e)}')
 
                 finally: 
                     self.task_queue.task_done()
@@ -199,7 +224,7 @@ class OpenAlexClient:
             except asyncio.CancelledError: 
                 break
             except Exception as e: 
-                print(f'Unexpected error in worker task: {e}')
+                self.logger.error(f'Unexpected error in worker task: {str(e)}')
                 break
 
 
@@ -211,6 +236,7 @@ class OpenAlexClient:
         try:
             
             for date_range in self.date_list:
+                self.logger.info(f'Building topic search URL for date range: {date_range}')
                 url = self._build_topicsearch_url(topic_id, 
                                     start_date=date_range['start'],
                                     end_date=date_range['end'])
@@ -220,7 +246,7 @@ class OpenAlexClient:
 
             completed_tasks = 0 
             task_count = self.task_queue.qsize()
-            print(f'Starting with {task_count} tasks')
+            self.logger.info(f'Starting with {task_count} tasks')
 
             worker_tasks = [
                 asyncio.create_task(self._worker_task()) for _ in range(self.max_concurrent_requests)
@@ -234,11 +260,11 @@ class OpenAlexClient:
                         #results is a tuple of (date_range (dict), results (list of dictionaries))
                         all_results.append(results) 
                         completed_tasks += 1
-                        print(f'Completed {completed_tasks} of {task_count} tasks')
+                        self.logger.info(f'Completed {completed_tasks} of {task_count} tasks')
 
                     self.result_queue.task_done()
                 except Exception as e: 
-                    print(f'Error processing results: {e}')
+                    self.logger.error(f'Error processing results: {e}')
 
             for task in worker_tasks: 
                 task.cancel()
@@ -247,7 +273,7 @@ class OpenAlexClient:
             
             #all_results is a list of tuples (date_range (dict), results (list of dictionaries)), need to be converted to a dataframe. Note that publicaton date is ISO 8601 format 
             if all_results: 
-                print('Processing Results')
+                self.logger.info('Processing Results')
                 all_results_df = pd.DataFrame()
                 #unpack list of tuples
                 for date_range, result_json in all_results: 
@@ -297,4 +323,4 @@ class OpenAlexClient:
 
     def validate_results(self, results_df: pd.DataFrame, topic_id: str): 
         #run quick request - grap header results, validate against results df 
-        assert len(results_df) == len(results_df['id'].unique()), 'Number of results does not match number of unique ids'
+        assert len(results_df) == len(results_df['id'].unique()), self.logger.error('Number of results does not match number of unique ids')

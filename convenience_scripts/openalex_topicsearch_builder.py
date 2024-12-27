@@ -9,13 +9,14 @@ from libraries.openalex_client import OpenAlexClient
 
 class oa_topicsearch_builder: 
 
-    def __init__(self): 
-        self.oa_client = OpenAlexClient()
+    def __init__(self, logger = None): 
+        self.oa_client = OpenAlexClient(logger=logger)
         self.goldset_path_pq = Path(__file__).parent.parent / 'dataset' / 'combined_goldset.parquet'
         self.goldset_path_xlsx = Path(__file__).parent.parent / 'dataset' / 'combined_goldset.xlsx'
         self.goldset_path_pq_out = Path(__file__).parent.parent / 'dataset' / 'combined_goldset_oatopics.parquet'
         self.goldset_path_xlsx_out = Path(__file__).parent.parent / 'dataset' / 'combined_goldset_oatopics.xlsx'
         self.goldset_df = pd.read_parquet(self.goldset_path_pq)
+        self.logger = logger
         
 
     async def retrieve_oa_topics(self): 
@@ -25,7 +26,7 @@ class oa_topicsearch_builder:
             #drop duplicate oa_ids in the first instnnce 
             goldset_df_nonduplicate = goldset_df_valid_id.drop_duplicates(subset='retrieved_oa_id')
             goldset_df_nonduplicate['retrieved_oa_id'] = goldset_df_nonduplicate['retrieved_oa_id'].apply(self._clean_oa_id)
-            print('Retrieving topics for goldset, total number of unique oa ids: ', len(goldset_df_nonduplicate['retrieved_oa_id']))
+            self.logger.info(f'Retrieving OA topics for goldset, total number of unique oa ids: {len(goldset_df_nonduplicate["retrieved_oa_id"])}')
             retrieved_goldset_topic_df = await client.retrieve_oa_data(goldset_df_nonduplicate['retrieved_oa_id'])
         # Clean up IDs for comparison
         retrieved_goldset_topic_df['id'] = retrieved_goldset_topic_df['id'].apply(self._clean_oa_id)
@@ -44,7 +45,7 @@ class oa_topicsearch_builder:
         
         # Find missing IDs
         missing_ids = set(goldset_df_valid_id['retrieved_oa_id']) - set(retrieved_goldset_topic_df['id'])
-        print('Number of ids not retrieved: ', len(missing_ids))
+        self.logger.info(f'Number of ids not retrieved: {len(missing_ids)}')
 
         if missing_ids: 
             missing_ids_df_rerun = await self.rerun_missing_ids(missing_ids)
@@ -55,7 +56,8 @@ class oa_topicsearch_builder:
             )
 
             #check number of rows with missing topics 
-            print('Number of rows with missing topics after rerun: ', goldset_df_valid_id['primary_topic'].isna().sum())
+            if goldset_df_valid_id['primary_topic'].isna().sum() > 0: 
+                self.logger.warning(f'Number of rows with missing topics after rerun: {str(goldset_df_valid_id['primary_topic'].isna().sum())}')
 
         #merge valid id back with full goldset 
         complete_topic_mapping = dict(zip(
@@ -65,12 +67,12 @@ class oa_topicsearch_builder:
         #normazlie oa_id before mapping 
         self.goldset_df['retrieved_oa_id'] = self.goldset_df['retrieved_oa_id'].apply(lambda x : self._clean_oa_id(x) if x is not None else None)
         self.goldset_df['primary_topic'] = self.goldset_df['retrieved_oa_id'].map(complete_topic_mapping)
-        print('Number of rows with missing topics with valid OA ids after gold set topic update: ', 
-              self.goldset_df[
-                  (self.goldset_df['retrieved_oa_id'].notna()) & 
-                  (self.goldset_df['primary_topic'].isna())
-              ].shape[0]
-        )
+        self.logger.info(f'Number of rows with missing topics with valid OA ids after gold set topic update: {
+            self.goldset_df[
+                (self.goldset_df["retrieved_oa_id"].notna()) & 
+                (self.goldset_df["primary_topic"].isna())
+            ].shape[0]
+        }')
         #update goldset files 
         self.goldset_df.to_parquet(self.goldset_path_pq_out)
         self.goldset_df.to_excel(self.goldset_path_xlsx_out)
@@ -90,5 +92,5 @@ class oa_topicsearch_builder:
         
         self.goldset_df['topic_id'] = self.goldset_df['primary_topic'].apply(lambda x: x['id'] if pd.notna(x) else None)
         selected_topic_ids = list(set(self.goldset_df['topic_id'].dropna()))
-        print('Number of topic ids generated: ', len(selected_topic_ids))
+        self.logger.info(f'Number of topic ids generated: {len(selected_topic_ids)}')
         return selected_topic_ids
