@@ -324,3 +324,6 @@ class OpenAlexClient:
     def validate_results(self, results_df: pd.DataFrame, topic_id: str): 
         #run quick request - grap header results, validate against results df 
         assert len(results_df) == len(results_df['id'].unique()), self.logger.error('Number of results does not match number of unique ids')
+
+
+
