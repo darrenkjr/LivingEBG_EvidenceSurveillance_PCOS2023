@@ -29,5 +29,8 @@ Thumbs.db
 *.log
 debug_results/
 manuscript/
+search_results/openalex/overarching/topic_search
+search_results/pubmed/overarching/
+evaluation_results/
 
 # 
