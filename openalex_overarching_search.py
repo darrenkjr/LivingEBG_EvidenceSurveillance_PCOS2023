@@ -4,8 +4,8 @@ import asyncio
 from libraries.openalex_client import OpenAlexClient
 import pyarrow as pa
 import pyarrow.parquet as pq
-from convenience_scripts.openalex_topicsearch_builder import oa_topicsearch_builder
-from convenience_scripts.eval import search_evaluation
+from libraries.openalex_topicsearch_builder import oa_topicsearch_builder
+from libraries.eval import search_evaluation
 from pathlib import Path
 from libraries.logging_config import LoggerConfig
 
