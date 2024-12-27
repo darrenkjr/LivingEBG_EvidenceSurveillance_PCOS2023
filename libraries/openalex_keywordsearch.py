@@ -3,9 +3,7 @@ from pathlib import Path
 import ast 
 import sys 
 import asyncio
-project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root))
-from libraries.openalex_client import OpenAlexClient
+from openalex_client import OpenAlexClient
 
 class oa_topicsearch_builder: 
 

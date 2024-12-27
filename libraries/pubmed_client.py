@@ -6,7 +6,7 @@ from typing import List, Dict
 import dotenv
 dotenv.load_dotenv()
 import os 
-from libraries.convenience_func import ConvenienceFunc
+from convenience_func import ConvenienceFunc
 from urllib.parse import urlparse, parse_qsl, urlencode
 from metapub import PubMedFetcher
 from metapub.exceptions import MetaPubError

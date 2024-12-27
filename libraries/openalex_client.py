@@ -6,8 +6,10 @@ from typing import List, Dict
 import dotenv
 dotenv.load_dotenv()
 import os 
-from libraries.convenience_func import ConvenienceFunc
+from convenience_func import ConvenienceFunc
 from urllib.parse import urlparse, parse_qsl, urlencode
+
+
 class OpenAlexClient:
 
     def __init__(self, max_concurrent_requests: int = 3, max_retries: int = 4, logger = None):
