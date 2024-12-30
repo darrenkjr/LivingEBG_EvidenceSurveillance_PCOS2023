@@ -57,7 +57,24 @@ class OpenAlexClient:
         id_chunk = '|'.join(id_list)
         return f'https://api.openalex.org/works?filter=ids.openalex:{id_chunk}&select=id,title,primary_topic,primary_location&per-page=200&mailto={self.email}'
 
-        
+    def _build_oa_booleankw_search_url(self, query: list, start_date: str, end_date: str, cursor: str = '*'): 
+        '''
+        Build OA api URL for each keyword query in list
+        '''
+        return f'https://api.openalex.org/works?filter=title_and_abstract.search:{query},from_publication_date:{start_date},to_publicaton_date:{end_date}&select=id,title,primary_topic,primary_location&per-page=200&cursor={cursor}&mailto={self.email}'
+
+
+    async def retrieve_oa_kwsearch_data(self, query_list : list): 
+
+        '''
+        loops through keyword queries in given query_list and retrieve OA search results 
+        '''
+
+        #take a look at oa_paginaed_results schema for similar pattern for use here - use   _build_oa_booleankw_search_url to build uRL to make async requests
+
+        pass
+
+
     async def retrieve_oa_data(self, oa_ids): 
         '''
         Retrieve topics for each oa id in the oa gold set df 
@@ -322,6 +339,7 @@ class OpenAlexClient:
             if self.session: 
                 await self.session.close()
                 self.session = None
+
 
     def validate_results(self, results_df: pd.DataFrame, topic_id: str): 
         #run quick request - grap header results, validate against results df 
