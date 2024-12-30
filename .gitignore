@@ -33,4 +33,8 @@ search_results/openalex/overarching/topic_search
 search_results/pubmed/overarching/
 evaluation_results/
 
+
+# Alternate Data Stream Identifiers
+*:Zone.Identifier
+
 # 
