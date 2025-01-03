@@ -15,13 +15,14 @@ def ris_eval_pipeline(database, search_type):
         database: embase vs medline 
     '''
     logger = LoggerConfig.setup_logger(logger_name = f'{database}_{search_type}')
-    search_eval_cls = search_evaluation(database = database, search_type = 'overarching', logger = logger)
+    search_eval_cls = search_evaluation(database = database, search_type = search_type, logger = logger)
     search_eval_cls.run_eval_pipeline()
 
 
-database_list = ['embase', 'medline']
+database_list = ['medline']
 for database in database_list: 
-    ris_eval_pipeline(database, search_type = 'overarching')
+    # ris_eval_pipeline(database, search_type = 'overarching')
+    ris_eval_pipeline(database, search_type = 'topic_specific')
 
 
 

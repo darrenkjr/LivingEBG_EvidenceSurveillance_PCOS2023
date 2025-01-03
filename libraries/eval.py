@@ -121,7 +121,6 @@ class search_evaluation:
 
         self.results_df.to_parquet(self.consolidated_results_path)
         self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
-
         self.result_id_col = self.search_results_id_mappings[self.database]
         #save cosolidated rsults 
         
@@ -153,8 +152,33 @@ class search_evaluation:
 
     def _load_topic_specific_search_results(self): 
 
-        self.logger_info('Loading search results...')
-        
+        self.logger.info('Loading search results...')
+        valid_question_id = list(self.groundtruth_df['question_id'].unique())
+        self.results_df = pd.DataFrame()
+
+        for file in self.search_results_path.iterdir(): 
+            if file.suffix == '.ris': 
+                # Do all string operations in one line
+                current_question_id = file.stem.rsplit('_', 1)[0].replace('gdg_', 'gdg').replace('gdg', '').replace('_', '.')
+                #read current file 
+                with open(file, 'r', encoding='utf-8') as f: 
+                        df = pd.DataFrame(rispy.load(f, skip_unknown_tags = True))
+                        df['question_id'] = current_question_id
+                        self.results_df = pd.concat([self.results_df, df], ignore_index=True)
+        try:    
+            assert set(self.results_df['question_id'].unique()).issubset(set(valid_question_id)), \
+                f"Found invalid question IDs: {set(self.results_df['question_id'].unique()) - set(valid_question_id)}"
+                
+
+
+            self.result_df.to_parquet(self.consolidated_results_path)
+            self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
+            self.result_id_col = self.search_results_id_mappings[self.database]
+
+        except AssertionError: 
+            self.logger.error('Found invalid question ids between results and input ground truth dataframes. Migh want to recheck results from search retrieval.')
+            raise
+
 
 
     def _process_oa(self): 
@@ -198,7 +222,7 @@ class search_evaluation:
 
 
     def process_topicspecific_search_results(self): 
-        self._load_search_results()
+        self._load_topic_specific_search_results()
         self.results_df[self.result_id_col] = self.results_df[self.result_id_col].str.lower()
         # Evaluate matches for each query group
         evalmetrics_df = pd.DataFrame()
@@ -281,4 +305,4 @@ class search_evaluation:
         if self.search_type == 'overarching': 
             self.process_overarching_search_results()
         elif self.search_type == 'topic_specific': 
-            self.process_topicspecific_search_results
+            self.process_topicspecific_search_results()
