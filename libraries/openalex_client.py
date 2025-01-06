@@ -57,12 +57,12 @@ class OpenAlexClient:
         id_chunk = '|'.join(id_list)
         return f'https://api.openalex.org/works?filter=ids.openalex:{id_chunk}&select=id,title,primary_topic,primary_location&per-page=200&mailto={self.email}'
 
-    def _build_oa_booleankw_search_url(self, query: list, start_date: str, end_date: str, cursor: str = '*', search_filter: str = 'default.search'): 
+    def _build_oa_booleankw_search_url(self, query: list, start_date: str, end_date: str, cursor: str = '*', search_filter: str = 'title_and_abstract.search'): 
         '''
         Build OA api URL for each keyword query in list. 
         search_filter: title_and_abstract.search, default.search (title, abs and full text), title.search (title only), abstract.search (abstract only)
         '''
-        return f'https://api.openalex.org/works?filter={search_filter}:"{query}",type:article|review,from_publication_date:{start_date},to_publication_date:{end_date}&select=id,ids,title,abstract_inverted_index,publication_date&per-page=200&cursor={cursor}&mailto={self.email}'
+        return f'https://api.openalex.org/works?filter={search_filter}:{query},from_publication_date:{start_date},to_publication_date:{end_date}&select=id,ids,title,abstract_inverted_index,publication_date&per-page=200&cursor={cursor}&mailto={self.email}'
     
 
     async def retrieve_oa_kwsearch_data(self, query : str) -> pd.DataFrame: 

@@ -31,16 +31,28 @@ class search_evaluation:
         'medline' : 'id'
     } 
 
+    question_id_mappings = {
+        '1.5.1, 1.5.2' : '1.5',
+        '1.4.1, 1.4.2' : '1.4',
+        '1.10.' : '1.10', 
+        '2.1.1 / 2.1.2' : '2.1',
+        '4.2 / 4.3' : '4.2.4.3.combined',
+        '4.10.' : '4.10', 
+    }
 
     def __init__(self, database: str, search_type: str, vector_search: bool = False, logger = None, strategy_type = 'boolkw_search'): 
+        self.logger = logger
         self.database = database
         self.search_type = search_type
         self.vector_search_flag = vector_search
+
+        #columns corresponding with id columns from database 
         self.eval_id_col = self.database_eval_id_mappings[self.database]
+        self.result_id_col = self.search_results_id_mappings[self.database]
         self.index_id_col = 'included_article_id'
         self.groundtruth_df = self._load_groundtruth()
         self.goldset_df = self._load_gold_set()
-        self.logger = logger
+        
         #default strategy type is boolkw_search 
         self.strategy_type = strategy_type
 
@@ -59,16 +71,37 @@ class search_evaluation:
         self.save_eval_path = Path(__file__).parent.parent / 'evaluation_results' / self.database / self.search_type / self.strategy_type if self.strategy_type \
         else Path(__file__).parent.parent / 'evaluation_results' / self.database / self.search_type
 
+        self.save_eval_missed_results_path = Path(__file__).parent.parent / 'evaluation_results' / self.database / self.search_type / self.strategy_type / 'matched_missed_results' if self.strategy_type \
+        else Path(__file__).parent.parent / 'evaluation_results' / self.database / self.search_type / 'matched_missed_results'
+
         if not self.save_eval_path.exists(): 
             self.save_eval_path.mkdir(parents=True, exist_ok=True)
 
+        if not self.save_eval_missed_results_path.exists(): 
+            self.save_eval_missed_results_path.mkdir(parents=True, exist_ok=True)
+
     def _load_groundtruth(self): 
         self.groundtruth_path = Path(__file__).parent.parent / 'dataset' / 'fullgroundtruth_valid_apimerge_df.parquet'
-        return pd.read_parquet(self.groundtruth_path)
+        _df = pd.read_parquet(self.groundtruth_path)
+        #lower case id cols 
+        mask = _df[self.eval_id_col].notna() & (_df[self.eval_id_col] != '')
+        _df.loc[mask, self.eval_id_col] = (_df.loc[mask, self.eval_id_col]
+                                        .str.lower()
+                                        .str.strip())
+        
+        self.logger.info(f"Processed {mask.sum()} non-empty IDs out of {len(_df)} total entries")
+        return _df
     
     def _load_gold_set(self): 
         self.gold_set_path = Path(__file__).parent.parent / 'dataset' / 'combined_goldset.parquet'
-        return pd.read_parquet(self.gold_set_path)
+        _df = pd.read_parquet(self.gold_set_path)
+        mask = _df[self.eval_id_col].notna() & (_df[self.eval_id_col] != '')
+        _df.loc[mask, self.eval_id_col] = (_df.loc[mask, self.eval_id_col]
+                                        .str.lower()
+                                        .str.strip())
+        
+        self.logger.info(f"Processed {mask.sum()} non-empty IDs out of {len(_df)} total entries")
+        return _df
     
     def _load_overarching_search_results(self): 
 
@@ -78,184 +111,195 @@ class search_evaluation:
         if not self.search_results_path.iterdir(): 
             self.logger.error('No search results found in folder, check paths') 
             raise Exception('No search results found in folder, check paths')
+        
+        #check if consolidated results path exists no need to do load again 
+        if self.consolidated_results_path.exists(): 
+            self.logger.info(f'Consolidated results already exist, loading from {str(self.consolidated_results_path)}')
+            self.results_df = pd.read_parquet(self.consolidated_results_path)
 
-        self.results_df = pd.DataFrame()
+        else: 
+            self.results_df = pd.DataFrame()
 
-        if self.database == 'oa' or self.database == 'pubmed':  
+            if self.database == 'oa' or self.database == 'pubmed':  
 
-            if self.search_type == 'overarching' and self.strategy_type == 'boolkw_search': 
-                #extract query from file name 
-                self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
-                for file in self.search_results_path.iterdir(): 
-                    if file.suffix == '.parquet': 
-                        query = file.name.split('_')[2].replace('.parquet', '')
-                        df = pd.read_parquet(file)
-                        df['query'] = query
-                        self.results_df = pd.concat([self.results_df, df], ignore_index=True)
-                         
-            elif self.search_type == 'overarching' and self.strategy_type == 'oatopic_search':
-                self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
-                for file in self.search_results_path.iterdir(): 
-                #consolidate results if we are doing an ovarcing openalex topic search 
-                    if file.suffix == '.parquet': 
-                        df = pd.read_parquet(file)
-                        self.results_df = pd.concat([self.results_df, df], ignore_index=True)
-                    else: 
-                        raise ValueError(f'File {file} is not a parquet file')
+                if self.search_type == 'overarching' and self.strategy_type == 'boolkw_search': 
+                    #extract query from file name 
+                    self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
+                    for file in self.search_results_path.iterdir(): 
+                        if file.suffix == '.parquet': 
+                            query = file.name.split('_')[2].replace('.parquet', '')
+                            df = pd.read_parquet(file)
+                            df['query'] = query
+                            self.results_df = pd.concat([self.results_df, df], ignore_index=True)
+                            
+                elif self.search_type == 'overarching' and self.strategy_type == 'oatopic_search':
+                    self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
+                    for file in self.search_results_path.iterdir(): 
+                    #consolidate results if we are doing an ovarcing openalex topic search 
+                        if file.suffix == '.parquet': 
+                            df = pd.read_parquet(file)
+                            self.results_df = pd.concat([self.results_df, df], ignore_index=True)
+                        else: 
+                            raise ValueError(f'File {file} is not a parquet file')
 
 
-        if self.database == 'embase' or self.database == 'medline': 
-            #ris files are downloaded as batches from ovid medline so need to consolidate results 
-            if self.search_type == 'overarching': 
-                self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
-                for file in self.search_results_path.iterdir(): 
-                    if file.suffix == '.ris': 
-                        try: 
-                            with open(file, 'r', encoding='utf-8') as f: 
-                                df = pd.DataFrame(rispy.load(f, skip_unknown_tags = True))
-                                self.results_df = pd.concat([self.results_df, df], ignore_index=True)
-                        except Exception as e: 
-                            self.logger.error(f'Error loading {file}: {e}', exc_info=True)
-                            raise
-                    
+            if self.database == 'embase' or self.database == 'medline': 
+                #ris files are downloaded as batches from ovid medline so need to consolidate results 
+                if self.search_type == 'overarching': 
+                    self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
+                    for file in self.search_results_path.iterdir(): 
+                        if file.suffix == '.ris': 
+                            try: 
+                                with open(file, 'r', encoding='utf-8') as f: 
+                                    df = pd.DataFrame(rispy.load(f, skip_unknown_tags = True))
+                                    self.results_df = pd.concat([self.results_df, df], ignore_index=True)
+                            except Exception as e: 
+                                self.logger.error(f'Error loading {file}: {e}', exc_info=True)
+                                raise
+                        
 
-        self.results_df.to_parquet(self.consolidated_results_path)
-        self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
-        self.result_id_col = self.search_results_id_mappings[self.database]
-        #save cosolidated rsults 
+            self.results_df.to_parquet(self.consolidated_results_path)
+            self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
         
         
-    def process_overarching_search_results(self): 
-        self._load_overarching_search_results()
-        self.results_df[self.result_id_col] = self.results_df[self.result_id_col].str.lower()
-        # Evaluate matches for each query group
-        evalmetrics_df = pd.DataFrame()
-        if self.database == 'oa':
-            self._process_oa() 
-
-        match_results_df, missed_results_df, match_goldset_results_df, missed_goldset_results_df = self._evaluate_matches(self.results_df)
-        metrics_goldset = self.calc_eval_metrics(match_goldset_results_df, self.goldset_df, self.results_df)
-        metrics_goldset_df = pd.DataFrame.from_records([asdict(metrics_goldset)])
-        metrics_goldset_df['performance_on'] = 'goldset'
-        metrics_groundtruth = self.calc_eval_metrics(match_results_df, self.groundtruth_df, self.results_df)
-        metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
-        metrics_groundtruth_df['performance_on'] = 'groundtruth'
-        evalmetrics_df = pd.concat([evalmetrics_df, metrics_goldset_df, metrics_groundtruth_df], ignore_index=True)
-
-        #save matched and missed results 
-        match_results_df.to_parquet(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
-        missed_results_df.to_parquet(self.save_eval_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
-        match_goldset_results_df.to_parquet(self.save_eval_path / f'matched_goldset_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
-        missed_goldset_results_df.to_parquet(self.save_eval_path / f'missed_goldset_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
-
-        self.save_eval_results(evalmetrics_df)
-
+            #save cosolidated rsults  
+    
     def _load_topic_specific_search_results(self): 
 
         self.logger.info('Loading search results...')
-        valid_question_id = list(self.groundtruth_df['question_id'].unique())
-        self.results_df = pd.DataFrame()
 
-        for file in self.search_results_path.iterdir(): 
-            if file.suffix == '.ris': 
-                # Do all string operations in one line
-                current_question_id = file.stem.rsplit('_', 1)[0].replace('gdg_', 'gdg').replace('gdg', '').replace('_', '.')
-                #read current file 
-                with open(file, 'r', encoding='utf-8') as f: 
-                        df = pd.DataFrame(rispy.load(f, skip_unknown_tags = True))
-                        df['question_id'] = current_question_id
-                        self.results_df = pd.concat([self.results_df, df], ignore_index=True)
-        try:    
-            assert set(self.results_df['question_id'].unique()).issubset(set(valid_question_id)), \
-                f"Found invalid question IDs: {set(self.results_df['question_id'].unique()) - set(valid_question_id)}"
-                
+        #check if cosonolidated results path arlready exists 
+        
+        if self.consolidated_results_path.exists(): 
+            self.results_df = pd.read_parquet(self.consolidated_results_path)
+            self.logger.info(f'Consolidated search results already exists, loading from {str(self.consolidated_results_path)}')
+            return
 
 
-            self.result_df.to_parquet(self.consolidated_results_path)
+        else: 
+            self.groundtruth_df['question_id'] = self.groundtruth_df['question_id'].map(lambda x: self.question_id_mappings.get(x, x))
+            valid_question_id = list(self.groundtruth_df['question_id'].unique())
+            self.results_df = pd.DataFrame()
+
+            for file in self.search_results_path.iterdir(): 
+                if file.suffix == '.ris': 
+                    # Do all string operations in one line
+                    current_question_id = file.stem.rsplit('_', 1)[0].replace('gdg', '').replace('_', '.')
+                    #read current file 
+                    with open(file, 'r', encoding='utf-8') as f: 
+                            df = pd.DataFrame(rispy.load(f, skip_unknown_tags = True))
+                            df['question_id'] = current_question_id
+                            self.results_df = pd.concat([self.results_df, df], ignore_index=True)
+            
+            self.results_df.to_parquet(self.consolidated_results_path)
             self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
-            self.result_id_col = self.search_results_id_mappings[self.database]
-
-        except AssertionError: 
-            self.logger.error('Found invalid question ids between results and input ground truth dataframes. Migh want to recheck results from search retrieval.')
-            raise
-
-
-
-    def _process_oa(self): 
-
-        self.results_df[self.result_id_col] = self.results_df[self.result_id_col].str.replace('https://openalex.org/', '')
-        #if we are doing a boolkw search and overarching search, we need to evaluate matches for each query (when testing on goldset)
-        if self.strategy_type == 'boolkw_search' and self.search_type == 'overarching': 
-            query_list = self.results_df['query'].unique()
-            if len(query_list) > 1: 
-                # Process all queries at once using groupby
-                grouped_results = self.results_df.groupby('query')
-                
-                for query, result_df_kwquery_oa in grouped_results:
-                    self.logger.info(f'Evaluating matches for Database: {self.database}, Search type: {self.search_type}, Strategy type: {self.strategy_type}, query: {query}')
-                    match_results_df, missed_results_df, match_goldset_results_df, missed_goldset_results_df = self._evaluate_matches(result_df_kwquery_oa)
+            
+            
+            try:    
+                assert set(valid_question_id).issubset(set(self.results_df['question_id'].unique())), \
+                    f"Found invalid question IDs: {set(valid_question_id) - set(self.results_df['question_id'].unique())}"
                     
-                    # Calculate metrics for goldset and groundtruth
-                    metrics_goldset = self.calc_eval_metrics(match_goldset_results_df, self.goldset_df, result_df_kwquery_oa)
-                    metrics_groundtruth = self.calc_eval_metrics(match_results_df, self.groundtruth_df, result_df_kwquery_oa)
-                    
-                    # Create dataframes for both metric types
-                    metrics_goldset_df = pd.DataFrame.from_records([asdict(metrics_goldset)])
-                    metrics_goldset_df['query'] = query
-                    metrics_goldset_df['performance_on'] = 'goldset'
-                    metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
-                    metrics_groundtruth_df['query'] = query
-                    metrics_groundtruth_df['performance_on'] = 'groundtruth'
-                    evalmetrics_df = pd.concat([evalmetrics_df, metrics_goldset_df, metrics_groundtruth_df], ignore_index=True)
-
-                    #save matched and missed results 
-                    match_results_df.to_parquet(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}_{query}.parquet')
-                    missed_results_df.to_parquet(self.save_eval_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}_{query}.parquet')
-                    match_goldset_results_df.to_parquet(self.save_eval_path / f'matched_goldset_results_{self.database}_{self.search_type}_{self.strategy_type}_{query}.parquet')
-                    missed_goldset_results_df.to_parquet(self.save_eval_path / f'missed_goldset_results_{self.database}_{self.search_type}_{self.strategy_type}_{query}.parquet')
-
-                    #save evaluation metrics 
-                self.save_eval_results(evalmetrics_df)
-        else: 
-            #if this is not a boolean keyword search on oa (ie: a topic search - we can evaluate as normal)
-            pass 
+            except AssertionError: 
+                self.logger.error('Found invalid question ids between results and input ground truth dataframes. Might want to recheck results from search retrieval.')
+                raise
 
 
-    def process_topicspecific_search_results(self): 
-        self._load_topic_specific_search_results()
+    def process_search_results(self): 
+        '''
+        WORK IN PROGRESS
+        
+        
+        '''
         self.results_df[self.result_id_col] = self.results_df[self.result_id_col].str.lower()
-        # Evaluate matches for each query group
+        if self.database == 'oa': 
+            #remove leading 'https://openalex.org/' from result_id_col
+            self.results_df[self.result_id_col] = self.results_df[self.result_id_col].str.replace('https://openalex.org/', '')
+
         evalmetrics_df = pd.DataFrame()
+        match_results_df, missed_results_df = self._evaluate_matches(self.groundtruth_df, self.results_df)
 
-        #evaluate on a question by question basis? 
+        #overall metrics 
+        self.question_id = 'overall'
+        metrics_groundtruth = self.calc_eval_metrics(match_results_df, self.groundtruth_df, self.results_df)
+        metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
+        metrics_groundtruth_df['performance_on'] = 'groundtruth'
+        metrics_groundtruth_df['question_id'] = self.question_id
+        evalmetrics_df = pd.concat([metrics_groundtruth_df], ignore_index=True)
+        #save matched and missed results 
+        self._save_eval_results(evalmetrics_df)
+        self._save_match_missed_results(match_results_df, missed_results_df)
 
-        #drop duplicates 
-    def _evaluate_matches(self, results_df: pd.DataFrame): 
-        self.logger.info(f'Dropping duplicates from {self.database} search results...')
-        self.logger.info(f'Number of duplicates: {results_df[self.result_id_col].duplicated().sum()}')
-        results_df.drop_duplicates(subset = self.result_id_col, inplace=True)
-        if self.database == 'medline': 
-            #special case - medline is fuctionally the same as pubmed 
-            database = 'pubmed'
-        else: 
-            database = self.database
-        results_df.rename(columns = {self.result_id_col: f'retrieved_{database}_id'}, inplace=True)
-        #check against gold set 
-        matched_goldset_ids = set(results_df[self.eval_id_col]).intersection(set(self.goldset_df[self.eval_id_col]))
-        match_goldset_results_df = self.goldset_df[self.goldset_df[self.eval_id_col].isin(matched_goldset_ids)]
-        missed_goldset_ids = set(self.goldset_df[self.eval_id_col]).difference(set(results_df[self.eval_id_col]))
-        missed_goldset_results_df = self.goldset_df[self.goldset_df[self.eval_id_col].isin(missed_goldset_ids)]
+        if self.search_type == 'topic_specific': 
+            grouped_evalmetrics_df = pd.DataFrame()
+            for question_id, grouped_df in self.results_df.groupby('question_id'): 
+                self.question_id = question_id
+                grouped_groundtruth_df = self.groundtruth_df[self.groundtruth_df['question_id'] == self.question_id]
+                match_results_df, missed_results_df = self._evaluate_matches(grouped_groundtruth_df, grouped_df)
+                metrics_groundtruth = self.calc_eval_metrics(match_results_df, grouped_groundtruth_df, grouped_df)
+                metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
+                metrics_groundtruth_df['performance_on'] = 'groundtruth'
+                metrics_groundtruth_df['question_id'] = self.question_id
+                grouped_evalmetrics_df = pd.concat([grouped_evalmetrics_df, metrics_groundtruth_df], ignore_index=True)
+            
+        
+            self._save_eval_results(grouped_evalmetrics_df)
 
-        # check against ground truth
-        matched_ids = set(results_df[self.eval_id_col]).intersection(set(self.groundtruth_df[self.eval_id_col]))
-        match_results_df = self.groundtruth_df[self.groundtruth_df[self.eval_id_col].isin(matched_ids)]
-        missed_ids = set(self.groundtruth_df[self.eval_id_col]).difference(set(results_df[self.eval_id_col]))
-        missed_results_df = self.groundtruth_df[self.groundtruth_df[self.eval_id_col].isin(missed_ids)]
-        return match_results_df, missed_results_df, match_goldset_results_df, missed_goldset_results_df
+
+    def _evaluate_matches(self, comparison_df: pd.DataFrame, results_df: pd.DataFrame): 
+        '''
+        Evaluate matches between comparison_df and results_df
+
+        Args: 
+            comparison_df: dataframe with ground truth data
+            results_df: dataframe with search results
+
+        Returns: 
+            matched_results_df: dataframe with matched results
+            missed_results_df: dataframe with missed results
+        '''
+        # Clean IDs for matching
+        results_df = results_df.copy()
+        comparison_df = comparison_df.copy()
+        
+        results_df['clean_id'] = results_df[self.result_id_col].astype(str).str.lower().str.strip()
+        comparison_df['clean_id'] = comparison_df[self.eval_id_col].astype(str).str.lower().str.strip()
+        
+        # Find matches using merge
+        matched_results_df = pd.merge(
+            comparison_df,
+            results_df,
+            left_on='clean_id',
+            right_on='clean_id',
+            how='inner'
+        )
+        
+        # Find missed using merge
+        missed_results_df = comparison_df[
+            ~comparison_df['clean_id'].isin(matched_results_df['clean_id'])
+        ]
+        
+        # Log results
+        self.logger.info(f"Total matches found: {len(matched_results_df)}")
+        self.logger.info(f"Unique matched IDs: {matched_results_df['clean_id'].nunique()}")
+        self.logger.info(f"Missed entries: {len(missed_results_df)}")
+        
+        # Clean up temporary column
+        matched_results_df = matched_results_df.drop('clean_id', axis=1)
+        missed_results_df = missed_results_df.drop('clean_id', axis=1)
+        
+        return matched_results_df, missed_results_df
+            
+
             
     def calc_eval_metrics(self, match_df: pd.DataFrame, comparison_df: pd.DataFrame, raw_results_df : pd.DataFrame) -> eval_metrics:   
-        self.logger.info('Calculating evaluation metrics...')
-        nnr = len(raw_results_df) 
+        self.logger.info(f'Calculating evaluation metrics for current {self.question_id}...')
+        nnr = len(raw_results_df)
+
+        #check length of match df 
+        if len(match_df) == 0: 
+            self.logger.warning(f'No matches found for {self.question_id}')
+            return eval_metrics(nnr, 0, 0, 0, 0, 0)
+        
         recall = len(match_df) / len(comparison_df)
         precision = len(match_df) / len(raw_results_df)
         f1 = self._calc_fscore(precision, recall, 1)
@@ -272,11 +316,15 @@ class search_evaluation:
 
         return eval_metrics(nnr, recall, precision, f1, f2, f3)
     
-    @staticmethod 
-    def _calc_fscore(precision: float, recall: float, beta: float = 1) -> float: 
-        return (1 + beta**2) * (precision * recall) / ((beta**2 * precision) + recall)
+    
+    def _calc_fscore(self, precision: float, recall: float, beta: float = 1) -> float: 
+        try: 
+            return (1 + beta**2) * (precision * recall) / ((beta**2 * precision) + recall)
+        except ZeroDivisionError: 
+            self.logger.warning(f'Recall is {recall}, Precision is {precision}, returning 0')
+            return 0
 
-    def save_eval_results(self, metrics_df: pd.DataFrame): 
+    def _save_eval_results(self, evalmetrics_df: pd.DataFrame): 
 
         self.logger.info('Saving evaluation results...')
 
@@ -289,9 +337,7 @@ class search_evaluation:
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
             }
 
-            metadata_df = pd.DataFrame.from_dict([metadata_dict])
-            evalmetrics_df = pd.concat([metadata_df, metrics_df], axis=1)
-
+            evalmetrics_df = evalmetrics_df.assign(**metadata_dict)
             filename = f'{self.search_type}_{self.database}_{self.strategy_type}_eval.parquet'
             evalmetrics_df.to_parquet(self.save_eval_path / filename) 
             self.logger.info(f'Evaluation results saved to: {self.save_eval_path / filename}')
@@ -300,9 +346,14 @@ class search_evaluation:
             self.logger.error(f'Error saving evaluation results: {e}')
             raise
 
+    def _save_match_missed_results(self, match_results_df: pd.DataFrame, missed_results_df: pd.DataFrame): 
+        match_results_df.to_parquet(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
+        missed_results_df.to_parquet(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
 
     def run_eval_pipeline(self): 
         if self.search_type == 'overarching': 
-            self.process_overarching_search_results()
+            self._load_overarching_search_results()
         elif self.search_type == 'topic_specific': 
-            self.process_topicspecific_search_results()
+            self._load_topic_specific_search_results()
+        
+        self.process_search_results()

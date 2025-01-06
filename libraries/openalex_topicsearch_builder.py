@@ -1,6 +1,6 @@
 import pandas as pd 
 from pathlib import Path
-from openalex_client import OpenAlexClient
+from libraries.openalex_client import OpenAlexClient
 
 class oa_topicsearch_builder: 
 

@@ -9,8 +9,7 @@ class ConvenienceFunc:
     def __init__(self, logger = None): 
         self.logger = logger
 
-    @staticmethod
-    def date_range_generator(start_date = '1950-01-01', end_date = '2022-12-31', interval_years = 2):
+    def date_range_generator(self, start_date = '1950-01-01', end_date = '2022-12-31', interval_years = 2):
         '''
         Generate a list of non-overlapping date ranges, one year apart
 
@@ -26,21 +25,52 @@ class ConvenienceFunc:
         end = datetime.strptime(end_date, '%Y-%m-%d')
         
         while current_date < end:
-            # Calculate the end of this range (either next year - 1 day, or the final end date)
-            range_end = min(
-                datetime(current_date.year + interval_years, current_date.month, current_date.day) - timedelta(days=1),
-                end
+            # Calculate years to add (ensure we don't go past end date)
+            years_to_add = min(
+                interval_years,
+                ((end.year - current_date.year) + 
+                 (1 if end.month > current_date.month or 
+                  (end.month == current_date.month and end.day >= current_date.day) 
+                  else 0))
             )
+            
+            # Calculate range end date
+            try:
+                range_end = datetime(
+                    current_date.year + years_to_add,
+                    current_date.month,
+                    current_date.day
+                ) - timedelta(days=1)
+            except ValueError:  # Handle leap years
+                range_end = datetime(
+                    current_date.year + years_to_add,
+                    current_date.month,
+                    28
+                )
+            
+            # Ensure we don't exceed the final end date
+            range_end = min(range_end, end)
             
             date_ranges.append({
                 'start': current_date.strftime('%Y-%m-%d'),
                 'end': range_end.strftime('%Y-%m-%d')
             })
             
-            # Move to start of next range
+            # Move to next day after range_end
             current_date = range_end + timedelta(days=1)
-            
+
+        self._validate_dateranges(date_ranges)
+
         return date_ranges
+    
+    @staticmethod
+    def _validate_dateranges(date_ranges): 
+                # Validate no gaps
+        for i in range(len(date_ranges) - 1):
+            current_end = datetime.strptime(date_ranges[i]['end'], '%Y-%m-%d')
+            next_start = datetime.strptime(date_ranges[i + 1]['start'], '%Y-%m-%d')
+            assert (next_start - current_end).days == 1, f"Gap found between {date_ranges[i]['end']} and {date_ranges[i + 1]['start']}"
+            
 
     @staticmethod 
     def clean_html_tags(text):

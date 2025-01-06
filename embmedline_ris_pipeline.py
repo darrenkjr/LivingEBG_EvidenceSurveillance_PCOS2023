@@ -19,10 +19,10 @@ def ris_eval_pipeline(database, search_type):
     search_eval_cls.run_eval_pipeline()
 
 
-database_list = ['medline']
-for database in database_list: 
-    # ris_eval_pipeline(database, search_type = 'overarching')
-    ris_eval_pipeline(database, search_type = 'topic_specific')
+database_list = ['embase']
+for database in database_list:
+    ris_eval_pipeline(database, search_type = 'overarching')
+    # ris_eval_pipeline(database, search_type = 'topic_specific')
 
 
 

@@ -22,13 +22,17 @@ class oa_keywordsearch_dev:
 
         self.results_path = current_dir / 'search_results' / 'openalex' / 'overarching' / 'boolkw_search'
         self.results_path.mkdir(parents=True, exist_ok=True)
+        self.consolidated_results_path = self.results_path / 'oa_overarching_consolidated_boolkw_search_results.parquet'
 
     async def oa_kw_search(self):
 
-        query_kw_list = ['PCOS', 
-                         'PCOD', 
-                         'polycystic ovarian syndrome', 'polycystic ovarian disease', 
-                         'polycystic ovary syndrome', 'polycystic ovary disease'] 
+        #double quatoes for exact match query
+        query_kw_list = ['"PCOS"', 
+                         '"PCOD"', 
+                         '"polycystic ovarian"', 
+                         '"polycystic ovary"',
+                         '"anovulation"'] 
+        
         try: 
             #examine existing files if topics have already been retrieved 
             existing_files = [f.name for f in self.results_path.iterdir() if f.is_file()]
@@ -37,6 +41,7 @@ class oa_keywordsearch_dev:
             #check if kw search results are in existing_kwsearch_resutls 
             kwsearch_results_retrieved = [query for query in query_kw_list if query in existing_kwsearch_resutls]
             query_kw_list_remaining = [query for query in query_kw_list if query not in kwsearch_results_retrieved]
+            query_join_all = [' OR '.join(query_kw_list)]
 
             if len(query_kw_list_remaining) == 0: 
                 self.logger.info('All keyword search results have already been retrieved, proceeding to evaluation')
@@ -44,7 +49,7 @@ class oa_keywordsearch_dev:
             elif len(query_kw_list_remaining) > 0: 
 
                 async with self.oa_client as client:
-                    for query in query_kw_list_remaining:
+                    for query in query_join_all:
                         try: 
                             self.logger.info(f'Retrieving OpenAlex keyword search results for {query}')
                             results_df = await client.retrieve_oa_kwsearch_data(query)
@@ -62,13 +67,20 @@ class oa_keywordsearch_dev:
                 
 
     async def oa_kw_search_eval_pipeline(self): 
-        try: 
-            await self.oa_kw_search()
+        #check if results already exist (consolidated)
+        if self.consolidated_results_path.exists(): 
+            self.logger.info(f'Consolidated results already exist, loading from {str(self.consolidated_results_path)}')
             self.logger.info('OpenAlex keyword search results retrieved, proceeding to evaluation')
             self.eval_cls.run_eval_pipeline()
-        except Exception as e: 
-            self.logger.error(f'Error running OpenAlex keyword search evaluation pipeline: {e}')
-            raise
+        
+        else: 
+            try: 
+                await self.oa_kw_search()
+                self.logger.info('OpenAlex keyword search results retrieved, proceeding to evaluation')
+                self.eval_cls.run_eval_pipeline()
+            except Exception as e: 
+                self.logger.error(f'Error running OpenAlex keyword search evaluation pipeline: {e}')
+                raise
 
 if __name__ == '__main__': 
     oa_keywordsearch_cls = oa_keywordsearch_dev()
