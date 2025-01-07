@@ -16,13 +16,16 @@
 ## Installation 
 
 1. **Install Prerequisites**
+
+* GIT LFS 
+
    ```bash
    # Install Git LFS
    git lfs install
    ```
-   
-   # Install Pixi: https://pixi.sh/latest/ 
+* Pixi package manager 
 
+* Install Pixi: https://pixi.sh/latest/ 
 
 2. **Clone Repository**
    ```bash
@@ -48,15 +51,14 @@
 
 ## Usage
 
-1. **Run Scripts**
-   ```bash
-   # Always use pixi run to ensure correct environment
-   pixi run python src/your_script.py
-   ```
 
-2. **Verify Environment**
+1. **Verify Environment for Torch**
    ```bash
    pixi run python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
    ```
+
+2. Run the following scripts to replicate the results in the paper: 
+
+* Placeholder
 
 
