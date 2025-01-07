@@ -1,7 +1,7 @@
 [project]
 description = "Add a short description here"
 name = "Study6"
-requires-python = ">= 3.11"
+requires-python = ">= 3.11, <3.13"
 version = "0.1.0"
 dependencies = ["python-dotenv", "rispy>=0.9.0,<0.10", "metapub>=0.5.12,<0.6"]
 
@@ -13,10 +13,6 @@ requires = ["hatchling"]
 channels = ["conda-forge"]
 platforms = ["win-64"]
 
-[tool.pixi.pypi-dependencies]
-study6 = { path = ".", editable = true }
-
-[tool.pixi.tasks]
 
 [tool.pixi.dependencies]
 pandas = ">=2.2.3,<3"
@@ -28,3 +24,28 @@ pyarrow = ">=18.1.0,<19"
 openpyxl = ">=3.1.5,<4"
 colorlog = ">=6.9.0,<7"
 beautifulsoup4 = ">=4.12.3,<5"
+
+[tool.pixi.pypi-dependencies]
+transformers = "*"
+adapters = "*"
+
+
+[tool.pixi.environments]
+cpu = ["cpu"]
+gpu = ["gpu"]
+default = ["cpu"]
+
+[tool.pixi.feature.cpu.pypi-dependencies]
+torch = { version = ">=2.5.1", index = "https://download.pytorch.org/whl/cpu" }
+torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/cpu" }
+
+
+[tool.pixi.feature.gpu]
+system-requirements = { cuda = "12.0" }
+
+[tool.pixi.feature.gpu.pypi-dependencies]
+torch = { version = ">=2.5.1", index = "https://download.pytorch.org/whl/cu124" }
+torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/cu124" }
+
+
+

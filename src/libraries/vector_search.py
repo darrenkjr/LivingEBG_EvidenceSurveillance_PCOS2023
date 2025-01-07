@@ -1,4 +1,3 @@
-
 from transformers import AutoTokenizer
 from adapters import AutoAdapterModel
 import numpy as np 
