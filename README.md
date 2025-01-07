@@ -17,13 +17,13 @@
 
 1. **Install Prerequisites**
 
-* GIT LFS 
+### GIT LFS 
 
    ```bash
    # Install Git LFS
    git lfs install
    ```
-* Pixi package manager 
+### Pixi package manager 
 
 * Install Pixi: https://pixi.sh/latest/ 
 
