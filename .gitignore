@@ -32,12 +32,10 @@ Thumbs.db
 
 # Project-specific
 *.log
-debug_results/
-manuscript/
-search_results/openalex/overarching/topic_search
-search_results/openalex/overarching/boolkw_search
-search_results/pubmed/overarching/
-evaluation_results/
+src/search_results/openalex/overarching/topic_search
+src/search_results/openalex/overarching/boolkw_search
+src/search_results/pubmed/overarching/
+src/evaluation_results/
 
 
 # Alternate Data Stream Identifiers
