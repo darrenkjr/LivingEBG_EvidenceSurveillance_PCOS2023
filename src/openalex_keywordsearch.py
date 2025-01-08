@@ -22,7 +22,7 @@ class oa_keywordsearch_dev:
 
         self.results_path = current_dir / 'search_results' / 'openalex' / 'overarching' / 'boolkw_search'
         self.results_path.mkdir(parents=True, exist_ok=True)
-        self.consolidated_results_path = self.results_path / 'oa_overarching_consolidated_boolkw_search_results.parquet'
+        self.consolidated_results_path = self.eval_cls.consolidated_results_path
 
     async def oa_kw_search(self):
 
@@ -54,7 +54,7 @@ class oa_keywordsearch_dev:
                             self.logger.info(f'Retrieving OpenAlex keyword search results for {query}')
                             results_df = await client.retrieve_oa_kwsearch_data(query)
                             result_table = pa.Table.from_pandas(results_df)
-                            pq.write_table(result_table, self.results_path / f'boolkw_results_{query}.parquet')
+                            pq.write_table(result_table, self.results_path / f'oa_boolkw_results_.parquet')
 
                         except Exception as e: 
                             self.logger.error(f'Error retrieving OpenAlex keyword search results for {query}: {e}')
@@ -62,29 +62,30 @@ class oa_keywordsearch_dev:
         
         except Exception as e: 
             self.logger.error(f'Error retrieving OpenAlex keyword search results: {e}')
-            raise
-
-                
+            raise   
 
     async def oa_kw_search_eval_pipeline(self): 
         #check if results already exist (consolidated)
         if self.consolidated_results_path.exists(): 
             self.logger.info(f'Consolidated results already exist, loading from {str(self.consolidated_results_path)}')
             self.logger.info('OpenAlex keyword search results retrieved, proceeding to evaluation')
-            self.eval_cls.run_eval_pipeline()
-        
+            evalmetrics_df = self.eval_cls.run_eval_pipeline()
+            
         else: 
             try: 
                 await self.oa_kw_search()
                 self.logger.info('OpenAlex keyword search results retrieved, proceeding to evaluation')
-                self.eval_cls.run_eval_pipeline()
+                evalmetrics_df = self.eval_cls.run_eval_pipeline()
             except Exception as e: 
                 self.logger.error(f'Error running OpenAlex keyword search evaluation pipeline: {e}')
                 raise
 
+        return evalmetrics_df
+
+
 if __name__ == '__main__': 
     oa_keywordsearch_cls = oa_keywordsearch_dev()
-    asyncio.run(oa_keywordsearch_cls.oa_kw_search_eval_pipeline())
+    evalmetrics_df = asyncio.run(oa_keywordsearch_cls.oa_kw_search_eval_pipeline())
 
         
 

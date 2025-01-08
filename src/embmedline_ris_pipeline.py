@@ -4,25 +4,34 @@ from pathlib import Path
 from libraries.logging_config import LoggerConfig
 from libraries.eval import search_evaluation
 
-def ris_eval_pipeline(database, search_type): 
 
-    '''
-    Takes in search result path containing ris files, evaluates results and saves metrics
+class embmedline_ris_pipeline: 
 
-    Args: 
-        path: Path object to search results 
-        search_type: overarching vs topic specific search
-        database: embase vs medline 
-    '''
-    logger = LoggerConfig.setup_logger(logger_name = f'{database}_{search_type}')
-    search_eval_cls = search_evaluation(database = database, search_type = search_type, logger = logger)
-    search_eval_cls.run_eval_pipeline()
+    def __init__(self,database, search_type): 
+        self.database = database
+        self.search_type = search_type
+        self.logger = LoggerConfig.setup_logger(logger_name= f'{database}_{search_type}')
+
+    def ris_eval_pipeline(self): 
+
+            '''
+            Takes in search result path containing ris files, evaluates results and saves metrics
+
+            Args: 
+                path: Path object to search results 
+                search_type: overarching vs topic specific search
+                database: embase vs medline 
+            '''
+            search_eval_cls = search_evaluation(database = self.database, search_type = self.search_type, logger = self.logger)
+            evalmetrics_df = search_eval_cls.run_eval_pipeline()
+            return evalmetrics_df
+    
+if __name__ == '__main__': 
+    embmedline_ris_pipeline_cls = embmedline_ris_pipeline(database = 'embase', search_type = 'overarching')
+    evalmetrics_df = embmedline_ris_pipeline_cls.ris_eval_pipeline()
 
 
-database_list = ['embase']
-for database in database_list:
-    ris_eval_pipeline(database, search_type = 'overarching')
-    # ris_eval_pipeline(database, search_type = 'topic_specific')
+
 
 
 

@@ -127,12 +127,10 @@ class search_evaluation:
                     self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
                     for file in self.search_results_path.iterdir(): 
                         if file.suffix == '.parquet': 
-                            query = file.name.split('_')[2].replace('.parquet', '')
                             df = pd.read_parquet(file)
-                            df['query'] = query
                             self.results_df = pd.concat([self.results_df, df], ignore_index=True)
                             
-                elif self.search_type == 'overarching' and self.strategy_type == 'oatopic_search':
+                elif self.search_type == 'overarching' and self.strategy_type == 'topic_search':
                     self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
                     for file in self.search_results_path.iterdir(): 
                     #consolidate results if we are doing an ovarcing openalex topic search 
@@ -228,6 +226,7 @@ class search_evaluation:
         #save matched and missed results 
         self._save_eval_results(evalmetrics_df)
         self._save_match_missed_results(match_results_df, missed_results_df)
+        
 
         if self.search_type == 'topic_specific': 
             grouped_evalmetrics_df = pd.DataFrame()
@@ -243,6 +242,15 @@ class search_evaluation:
             
         
             self._save_eval_results(grouped_evalmetrics_df)
+
+            evalmetrics_df = pd.concat([evalmetrics_df, grouped_evalmetrics_df], ignore_index=True)
+        evalmetrics_df['database'] = self.database
+        evalmetrics_df['search_type'] = self.search_type
+        evalmetrics_df['strategy_type'] = self.strategy_type
+        evalmetrics_df['vector_search'] = self.vector_search_flag
+        return evalmetrics_df      
+
+        
 
 
     def _evaluate_matches(self, comparison_df: pd.DataFrame, results_df: pd.DataFrame): 
@@ -356,4 +364,4 @@ class search_evaluation:
         elif self.search_type == 'topic_specific': 
             self._load_topic_specific_search_results()
         
-        self.process_search_results()
+        return self.process_search_results()
