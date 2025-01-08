@@ -59,6 +59,6 @@
 
 2. Run the following scripts to replicate the results in the paper: 
 
-* Placeholder
+* Run main_overarching.py to regenerate overarching search results and evaluation metrics 
 
 
