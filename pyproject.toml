@@ -33,7 +33,6 @@ adapters = "*"
 [tool.pixi.environments]
 cpu = ["cpu"]
 gpu = ["gpu"]
-default = ["cpu"]
 
 [tool.pixi.feature.cpu.pypi-dependencies]
 torch = { version = ">=2.5.1", index = "https://download.pytorch.org/whl/cpu" }
