@@ -4,11 +4,13 @@
 
 ### System Requirements
 * Python version >=3.11, <3.13
+* Git >=2.0, though latest version is recommended
 * Git LFS (for handling large files)
 
-### Supported Platforms 
+### Supported Platforms (Tested) 
 * Windows 10
-* Ubuntu 22.04 (Tested on WSL)
+* Ubuntu 22.04 (Tested via WSL2)
+* Rocky Linux 9.2 
 
 ### GPU Support (Optional)
 * CUDA 12.0 or higher (only needed for GPU environment)
@@ -19,15 +21,18 @@
 
 ### GIT LFS 
 
-   ```bash
-   # Install Git LFS
-   git lfs install
-   ```
+For Windows and most cases: 
+* Follow GIT LFS installation instruction available here: https://git-lfs.com/
+
+In instances with no sudo access, or you would simply like to install in your user account without accessing the server root account: 
+* Follow the instructions here: https://gist.github.com/pourmand1376/bc48a407f781d6decae316a5cfa7d8ab 
+
 ### Pixi package manager 
 
-* Install Pixi: https://pixi.sh/latest/ 
+* Install and follow instructions for Pixi: https://pixi.sh/latest/ 
 
 2. **Clone Repository**
+
    ```bash
    git clone https://github.com/your-username/LivingEBG_EvidenceSurveillance_PCOS2023
    cd LivingEBG_EvidenceSurveillance_PCOS2023
@@ -53,6 +58,7 @@
 
 
 1. **Verify Environment for Torch**
+
    ```bash
    pixi run python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
    ```
