@@ -24,6 +24,8 @@ pyarrow = ">=18.1.0,<19"
 openpyxl = ">=3.1.5,<4"
 colorlog = ">=6.9.0,<7"
 beautifulsoup4 = ">=4.12.3,<5"
+psycopg2 = ">=2.9.9,<3"
+sqlalchemy = ">=2.0.37,<3"
 
 [tool.pixi.pypi-dependencies]
 transformers = "*"

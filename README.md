@@ -63,7 +63,11 @@ In instances with no sudo access, or you would simply like to install in your us
    pixi run python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
    ```
 
-2. Run the following scripts to replicate the results in the paper: 
+2. Setup environment variables
+
+* Copy .env_example and rename it to .env, then replace the variables with your own values (see comments in .env_example)
+
+3. Run the following scripts to replicate the results in the paper: 
 
 * Run main_overarching.py to regenerate overarching search results and evaluation metrics 
 
