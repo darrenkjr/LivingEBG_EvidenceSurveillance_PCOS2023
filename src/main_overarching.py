@@ -33,10 +33,6 @@ def main():
     evalmetrics_df = asyncio.run(oa_keywordsearch_cls.oa_kw_search_eval_pipeline())
     total_evalmetrics_df = pd.concat([total_evalmetrics_df, evalmetrics_df], ignore_index=True)
     
-    #pubmed overarching 
-
-
-
     #parse ris files
     ris_database = ['embase', 'medline']
     for database in ris_database: 

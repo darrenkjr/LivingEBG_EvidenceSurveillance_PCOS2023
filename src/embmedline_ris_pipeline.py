@@ -27,7 +27,7 @@ class embmedline_ris_pipeline:
             return evalmetrics_df
     
 if __name__ == '__main__': 
-    embmedline_ris_pipeline_cls = embmedline_ris_pipeline(database = 'embase', search_type = 'overarching')
+    embmedline_ris_pipeline_cls = embmedline_ris_pipeline(database = 'embase', search_type = 'topic_specific')
     evalmetrics_df = embmedline_ris_pipeline_cls.ris_eval_pipeline()
 
 

@@ -2,14 +2,17 @@ import pandas as pd
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import html
+import sys
 from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+from libraries.logging_config import LoggerConfig
 
 class ConvenienceFunc: 
 
     def __init__(self, logger = None): 
         self.logger = logger
 
-    def date_range_generator(self, start_date = '1950-01-01', end_date = '2022-12-31', interval_years = 2):
+    def date_range_generator(self, start_date = '1990-01-01', end_date = '2022-12-31', interval_years = 2):
         '''
         Generate a list of non-overlapping date ranges, one year apart
 
@@ -93,8 +96,8 @@ class ConvenienceFunc:
         unsucessful_rob_path = dataset_dir / 'all_unsuccessful_nodupe_rob_FIXED.csv'
 
         #read in PCOS dataset, and extract valid rqs 
-        _df = pd.read_excel(rq_dataset_path, sheet_name='rq_evidence_review', engine='openpyxl', dtype={'question_id': str})
-        pcosrq_valid_df = _df.query('evidence_review_type == "SR" and included_num >= 5').copy()[['GDG', 'question_id', 'Topic', 'Question', 'sr_update', 'included_num', 'searchstrat_year_start', 'searchstrat_year_end']]
+        self.original_df = pd.read_excel(rq_dataset_path, sheet_name='rq_evidence_review', engine='openpyxl', dtype={'question_id': str})
+        pcosrq_valid_df = self.original_df.query('evidence_review_type == "SR" and included_num >= 5').copy()[['GDG', 'question_id', 'Topic', 'Question', 'sr_update', 'included_num', 'searchstrat_year_start', 'searchstrat_year_end']]
 
         #extract full ground truth dataset 
         fullgroundtruth_full_df = pd.read_excel(rq_dataset_path, sheet_name='included_articles', engine='openpyxl', dtype={'question_id': str, 'included_article_id': str, 'retrieved_oa_id': str, 'retrieved_embase_id': str, 'retrieved_pubmed_id': str}).copy()
@@ -229,3 +232,45 @@ class ConvenienceFunc:
         combined_goldset.to_parquet(dataset_dir / 'combined_goldset.parquet')
         combined_goldset.to_excel(dataset_dir / 'combined_goldset.xlsx', index=False)
         return combined_goldset
+    
+    def groundtruth_evalsetup(self): 
+        '''prepares evaluation ground truth in accordance with originally defined search strat year ranges'''
+        current_dir = Path(__file__).parent
+        dataset_dir = current_dir.parent / 'dataset'
+        groundtruth_path = dataset_dir / 'fullgroundtruth_valid_apimerge_df.parquet'
+        groundtruth_df = pd.read_parquet(groundtruth_path)
+
+        groundtruth_eval_df = groundtruth_df.copy()
+        print('Original length of ground truth:', len(groundtruth_eval_df))
+
+        groundtruth_eval_df = groundtruth_eval_df.query('(searchstrat_year_start <= year_pub_extract) | (searchstrat_year_start.isna())')
+        #check that all question_ids are present 
+        known_question_ids_no_new_articles = {'5.7.5', '5.7.1'}
+        try: 
+            assert set(groundtruth_eval_df['question_id'].unique()) == set(groundtruth_df['question_id'].unique()), f'Some question_ids are missing from the ground truth dataframe: {set(groundtruth_df["question_id"].unique()) - set(groundtruth_eval_df["question_id"].unique())}'
+        except AssertionError as e: 
+            missing_question_ids = set(groundtruth_df['question_id'].unique()) - set(groundtruth_eval_df['question_id'].unique())
+            if missing_question_ids == known_question_ids_no_new_articles: 
+                self.logger.warning(f'{missing_question_ids} are known to have no new articles in this latest edition of the guideline, proceeding...')
+                pass
+            else:
+                self.logger.error(f'Some question_ids are missing from the evaluation ground truth dataframe: {missing_question_ids}')
+                raise e
+
+        groundtruth_eval_df.to_parquet(dataset_dir / 'groundtruth_eval.parquet')
+        groundtruth_eval_df.to_excel(dataset_dir / 'groundtruth_eval.xlsx', index=False)
+        print('Length of ground truth to be evaluated (ie: papers that were included in this latest edition of the guideline):', len(groundtruth_eval_df))
+        print('Question ids not in original ground truth and original input evidence review:', set(self.original_df['question_id'].unique()) - set(groundtruth_eval_df['question_id'].unique()))
+        
+        return groundtruth_eval_df
+
+
+if __name__ == '__main__': 
+    logger = LoggerConfig.setup_logger('convenience_func')
+    convenience_func_cls = ConvenienceFunc(logger)
+    print('Prepping ground truth...')
+    convenience_func_cls.groundtruth_setup()
+    print('Prepping gold set...')
+    convenience_func_cls.goldset_setup()
+    print('Prepping evaluation ground truth...')
+    convenience_func_cls.groundtruth_evalsetup()
