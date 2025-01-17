@@ -3,6 +3,7 @@ import psycopg2
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from sqlalchemy import text
 from pathlib import Path
 
 load_dotenv()
@@ -13,12 +14,21 @@ class sql_data_migration:
         try:
             # Create a SQLAlchemy engine
             self.engine = create_engine(f'postgresql://{db_user}:{db_pwd}@localhost:5432/{db_name}')
+            with self.engine.connect() as conn:
+                    #check connections 
+                try: 
+                    conn.execute(text("SELECT 1"))  
+                    print("Connection successful")
+                except Exception as e:
+                    print(f"Error connecting to database: {e}")
+
             self.gdg_data_path = Path(__file__).parent.parent / 'dataset' / '_superseded' / 'PCOS_Guideline_Dataset_checked.xlsm'
             self.ground_truth_data_path = Path(__file__).parent.parent / 'dataset' / 'fullgroundtruth_valid_apimerge_df.parquet'
             
             self.database_mapping = {
                 'database_id' : [1, 2, 3, 4], 
-                'database_name' : ['pubmed', 'medline', 'embase', 'openalex']
+                'database_name' : ['pubmed', 'medline', 'embase', 'openalex'],
+                'free_api_available' : [True, False, True, True]
             }
 
             self.search_type_mapping = {
@@ -38,7 +48,7 @@ class sql_data_migration:
 
     def _check_tables(self):
         with self.engine.connect() as conn:
-            result = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
+            result = conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';"))
             tables = result.fetchall()
         return tables
 
@@ -55,7 +65,20 @@ class sql_data_migration:
         }
 
         for table_name, df in tabledf_dct.items():
-            df.to_sql(table_name, self.engine, if_exists='replace', index=False)
+            with self.engine.connect() as conn:
+                #check 
+                id_col = df.columns[0]
+                _ = conn.execute(text(f"SELECT {id_col} from {table_name}"))
+                existing_ids = [row[0] for row in _.fetchall()]
+            #conduct check for new ids 
+            insert_df = df[~df[id_col].isin(existing_ids)]
+            if not insert_df.empty: 
+                print(f"New IDs found for {table_name}") 
+                #insert new ids 
+                insert_df.to_sql(table_name, self.engine, if_exists='append', index=False)
+            else:
+                print(f"No new IDs found for {table_name}, moving on")
+
 
     def _load_gdg_data(self):
         _df = pd.read_excel(self.gdg_data_path, sheet_name='rq_evidence_review')
@@ -72,3 +95,10 @@ class sql_data_migration:
 
     def _load_ground_truth_data(self):
         _df = pd.read_parquet(self.ground_truth_data_path)
+
+if __name__ == '__main__':
+    db_name = os.getenv('DB_NAME')
+    db_user = os.getenv('DB_USER')
+    db_pwd = os.getenv('DB_PWD')
+    sql_instance = sql_data_migration(db_name, db_user, db_pwd)
+    sql_instance.fill_reference_tables()
