@@ -9,11 +9,14 @@ from datetime import datetime
 @dataclass 
 class eval_metrics: 
     nnr: int
+    n_retrieved: int 
+    n_missed : int
     recall: float
     precision: float
     f1_score: float
     f2_score: float
     f3_score: float
+
 
 class search_evaluation: 
 
@@ -32,12 +35,10 @@ class search_evaluation:
     } 
 
     question_id_mappings = {
-        '1.5.1, 1.5.2' : '1.5',
-        '1.4.1, 1.4.2' : '1.4',
-        '1.10.' : '1.10', 
-        '2.1.1 / 2.1.2' : '2.1',
-        '4.2 / 4.3' : '4.2.4.3.combined',
-        '4.10.' : '4.10', 
+        '1.5.1/1.5.2' : '1.5',
+        '1.4.1/1.4.2' : '1.4',
+        '2.1.1/2.1.2' : '2.1',
+        '4.2/4.3' : '4.2.4.3.combined'
     }
 
     def __init__(self, database: str, search_type: str, vector_search: bool = False, logger = None, strategy_type = 'boolkw_search'): 
@@ -158,7 +159,6 @@ class search_evaluation:
 
             if self.database == 'embase' or self.database == 'medline': 
                 #ris files are downloaded as batches from ovid medline so need to consolidate results 
-                
                 if self.search_type == 'overarching': 
                     self.logger.info(f'Consolidating search results for Database: {self.database}, Search Type: {self.search_type}, Strategy Type: {self.strategy_type}...')
                     for file in self.search_results_path.iterdir(): 
@@ -170,8 +170,16 @@ class search_evaluation:
                             except Exception as e: 
                                 self.logger.error(f'Error loading {file}: {e}', exc_info=True)
                                 raise
+
+                if self.database == 'medline': 
+                    result_df.rename(columns = {'Y1' : 'publication_year'}, inplace=True)
+                    #ensure it is int 
+                result_df['publication_year'] = result_df['publication_year'].astype(str).str.replace('//', '')
+                result_df['publication_year'] = result_df['publication_year'].astype(str).str.split(',').str[0]
+                result_df['publication_year'] = result_df['publication_year'].astype(int)
+                
             self.logger.info(f'Filtering results for year range {self.start_year_cutoff} to {self.end_year_cutoff}')
-            _result_df = result_df.query(f'Y1 >= {self.start_year_cutoff} & Y1 <= {self.end_year_cutoff}')
+            _result_df = result_df.query(f'publication_year >= {self.start_year_cutoff} & publication_year <= {self.end_year_cutoff}')
             self.results_df = _result_df.copy()
             self.results_df.to_parquet(self.consolidated_results_path)
             self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
@@ -267,8 +275,6 @@ class search_evaluation:
         return evalmetrics_df      
 
         
-
-
     def _evaluate_matches(self, comparison_df: pd.DataFrame, results_df: pd.DataFrame): 
         '''
         Evaluate matches between comparison_df and results_df
@@ -329,6 +335,8 @@ class search_evaluation:
         
         recall = len(match_df) / len(comparison_df)
         precision = len(match_df) / len(raw_results_df)
+        n_retrieved = len(match_df)
+        n_missed = len(comparison_df) - len(match_df)
         f1 = self._calc_fscore(precision, recall, 1)
         f2 = self._calc_fscore(precision, recall, 2)
         f3 = self._calc_fscore(precision, recall, 3)
@@ -341,7 +349,7 @@ class search_evaluation:
         self.logger.info(f'F2 score: {f2}')
         self.logger.info(f'F3 score: {f3}')
 
-        return eval_metrics(nnr, recall, precision, f1, f2, f3)
+        return eval_metrics(nnr, n_retrieved, n_missed, recall, precision, f1, f2, f3)
     
     
     def _calc_fscore(self, precision: float, recall: float, beta: float = 1) -> float: 

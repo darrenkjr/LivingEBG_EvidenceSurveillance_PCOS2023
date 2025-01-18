@@ -118,12 +118,14 @@ class ConvenienceFunc:
         # Filter fullgroundtruth_full_df to only include rows where question_id matches those in pcosrq_valid_df (mmeet inclusion criteria)
         fullgroundtruth_valid_df = fullgroundtruth_full_df.query('question_id in @pcosrq_valid_df["question_id"]')[required_cols]
 
+
         #consolidate ground truth datasets
         #OpenAlex 
         oa_groundtruth_df = pd.read_excel(apiretrieved_groundtruth_path, 
                                         sheet_name="api_results_oa", 
                                         engine='openpyxl', 
                                         dtype={'included_article_id': str})
+        oa_groundtruth_df = self._fix_question_ids(oa_groundtruth_df)
 
         # Embase dataset
         print("\nEMBASE Dataset:")
@@ -135,20 +137,21 @@ class ConvenienceFunc:
         print(embase_groundtruth_df[['primary_title', 'notes_abstract']].isna().sum())
         embase_groundtruth_df['primary_title'] = embase_groundtruth_df['primary_title'].fillna(embase_groundtruth_df['title_2ndsearch'])
         embase_groundtruth_df['notes_abstract'] = embase_groundtruth_df['notes_abstract'].fillna(embase_groundtruth_df['abstract_2ndsearch'])
-
+        embase_groundtruth_df = self._fix_question_ids(embase_groundtruth_df)
         # PubMed dataset
         print("\nPubMed Dataset:")
         pmed_groundtruth_df = pd.read_excel(apiretrieved_groundtruth_path, 
                                         sheet_name="api_results_pubmed", 
                                         engine='openpyxl', 
                                         dtype={'included_article_id': str, 'api_id_retrieved' : str})
-
+        pmed_groundtruth_df = self._fix_question_ids(pmed_groundtruth_df)
         # Fix: Fill each column separately
         pmed_groundtruth_df['title'] = pmed_groundtruth_df['title'].fillna(pmed_groundtruth_df['title_2ndsearch'])
         pmed_groundtruth_df['abstract'] = pmed_groundtruth_df['abstract'].fillna(pmed_groundtruth_df['abstract_2ndsearch'])
 
         #merge api results with with ground truth dataset 
         fullgroundtruth_valid_apimerge_df = fullgroundtruth_valid_df.copy()
+
 
         #citation network size and OA_id 
         fullgroundtruth_valid_apimerge_df[['retrieved_oa_id','citation_network_size']] = fullgroundtruth_valid_df.join(
@@ -263,6 +266,17 @@ class ConvenienceFunc:
         print('Question ids not in original ground truth and original input evidence review:', set(self.original_df['question_id'].unique()) - set(groundtruth_eval_df['question_id'].unique()))
         
         return groundtruth_eval_df
+    
+    def _fix_question_ids(self,df): 
+        df['question_id'] = (
+            df['question_id']
+            .astype(str)
+            .str.replace(r'\s+', '', regex=True)
+            .str.replace(',', '/', regex=False)
+            .str.replace('1.10.', '1.10', regex=False)
+            .str.replace('4.10.', '4.10', regex=False)
+        )
+        return df
 
 
 if __name__ == '__main__': 
