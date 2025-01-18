@@ -24,9 +24,8 @@ CREATE TABLE search_strategy_types (
 -- 2nd Level Tables 
 
 CREATE TABLE evidence_reviews (
-    evidence_review_id INT PRIMARY KEY, 
+    evidence_review_id VARCHAR(50) PRIMARY KEY, 
     gdg_id INT REFERENCES gdgs(gdg_id), 
-    question_id VARCHAR(5),
     question TEXT, 
     evidence_review_type TEXT, 
     included_num INT
@@ -35,11 +34,11 @@ CREATE TABLE evidence_reviews (
 -- 3rd level tables 
 CREATE TABLE ground_truth_articles (
     ground_truth_article_id INT PRIMARY KEY, 
-    evidence_review_id INT REFERENCES evidence_reviews(evidence_review_id), 
+    evidence_review_id VARCHAR(50) REFERENCES evidence_reviews(evidence_review_id), 
     included_reference TEXT, 
     author_year_format VARCHAR(200),
     extracted_publication_year INT, 
-    assessed_rob VARCHAR(10), 
+    assessed_rob VARCHAR(25), 
     retrieved_oa_id VARCHAR(50), 
     retrieved_embase_id VARCHAR(50), 
     retrieved_pubmed_id VARCHAR(50),
@@ -49,7 +48,7 @@ CREATE TABLE ground_truth_articles (
 
 CREATE TABLE search_strategies (
     search_strategy_id INT PRIMARY KEY, 
-    evidence_review_id INT REFERENCES evidence_reviews(evidence_review_id), 
+    evidence_review_id VARCHAR(50) REFERENCES evidence_reviews(evidence_review_id), 
     database_id INT REFERENCES databases(database_id), 
     searchstrat_year_start INT, 
     searchstrat_year_end INT, 
