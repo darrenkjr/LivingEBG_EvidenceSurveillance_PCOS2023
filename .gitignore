@@ -29,6 +29,7 @@ Thumbs.db
 *.temp
 *.swp
 *~
+*~$*.xlsx
 
 # Project-specific
 *.log
