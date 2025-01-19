@@ -88,7 +88,7 @@ class sql_data_migration:
                 self.logger.info(f"No new IDs found for {table_name}, moving on")
 
 
-    def _migrate_gdg_data(self):
+    def migrate_gdg_data(self):
         _df = pd.read_excel(self.gdg_data_path, sheet_name='rq_evidence_review')
         gdg_extract = _df[['GDG', 'Topic']].copy()
         gdg_extract.rename(columns = {'GDG' : 'gdg_id', 'Topic' : 'topic'}, inplace=True)
@@ -123,7 +123,7 @@ class sql_data_migration:
         if self._df_sqltable_column_check(evidence_review_extract, 'evidence_reviews') and self._prior_id_check(evidence_review_extract, 'evidence_review_id', 'evidence_reviews'): 
             evidence_review_extract.to_sql('evidence_reviews', self.engine, if_exists='append', index=False)
 
-    def _migrate_ground_truth_data(self):
+    def migrate_ground_truth_data(self):
         _ = pd.read_parquet(self.ground_truth_data_path)
         _df = _.copy().reset_index()
         
@@ -174,6 +174,14 @@ class sql_data_migration:
         else:
             self.logger.info(f"No prior IDs found for {table_name}, inserting new IDs")
             return True
+        
+    def migrate_search_result_data(self, table_name): 
+
+        pass 
+
+    def migrate_search_strategies(self, table_name): 
+        
+        pass 
 
     
 
@@ -184,5 +192,5 @@ if __name__ == '__main__':
     logger = LoggerConfig.setup_logger(logger_name = 'sql_data_migration')
     sql_instance = sql_data_migration(db_name, db_user, db_pwd, logger)
     sql_instance.fill_reference_tables()
-    sql_instance._migrate_gdg_data()
-    sql_instance._migrate_ground_truth_data()
+    sql_instance.migrate_gdg_data()
+    sql_instance.migrate_ground_truth_data()
