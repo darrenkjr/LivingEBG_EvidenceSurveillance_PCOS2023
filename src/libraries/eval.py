@@ -72,7 +72,10 @@ class search_evaluation:
         }
 
         self.search_results_path = database_search_results_path_mappings[self.database]
-        self.consolidated_results_path = self.search_results_path / f'{self.database}_{self.search_type}_consolidated_{self.strategy_type}_results.parquet'
+
+        self._consolidated_results_dir = Path(__file__).parent.parent / 'consolidated_results' 
+        self._consolidated_results_dir.mkdir(parents=True, exist_ok=True)
+        self.consolidated_results_path = self._consolidated_results_dir / f'{self.database}_{self.search_type}_consolidated_{self.strategy_type}_results.parquet'
         self.save_eval_path = Path(__file__).parent.parent / 'evaluation_results' / self.database / self.search_type / self.strategy_type if self.strategy_type \
         else Path(__file__).parent.parent / 'evaluation_results' / self.database / self.search_type
 

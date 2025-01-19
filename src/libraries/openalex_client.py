@@ -41,7 +41,7 @@ class OpenAlexClient:
     def _build_topicsearch_url(self, topic_id: str, start_date: str, end_date: str, cursor: str = '*'):
         """Build URL with email parameter for polite pool"""
         return (f"https://api.openalex.org/works?"
-                f"select=id,ids,title,abstract_inverted_index,publication_date&"
+                f"select=id,ids,title,abstract_inverted_index,publication_year&"
                 f"filter=primary_topic.id:{topic_id},"
                 f"type:article|review,"
                 f"from_publication_date:{start_date},"
@@ -62,7 +62,7 @@ class OpenAlexClient:
         Build OA api URL for each keyword query in list. 
         search_filter: title_and_abstract.search, default.search (title, abs and full text), title.search (title only), abstract.search (abstract only)
         '''
-        return f'https://api.openalex.org/works?filter={search_filter}:{query},from_publication_date:{start_date},to_publication_date:{end_date}&select=id,ids,title,abstract_inverted_index,publication_date&per-page=200&cursor={cursor}&mailto={self.email}'
+        return f'https://api.openalex.org/works?filter={search_filter}:{query},from_publication_date:{start_date},to_publication_date:{end_date}&select=id,ids,title,abstract_inverted_index,publication_year&per-page=200&cursor={cursor}&mailto={self.email}'
     
 
     async def retrieve_oa_kwsearch_data(self, query : str) -> pd.DataFrame: 

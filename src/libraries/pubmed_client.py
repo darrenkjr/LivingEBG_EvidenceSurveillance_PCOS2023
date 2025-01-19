@@ -17,7 +17,7 @@ import traceback
 
 class PubMedClient: 
 
-    def __init__(self, max_concurrent_requests: int = 3, max_retries: int = 4, logger = None): 
+    def __init__(self, max_concurrent_requests: int = 9, max_retries: int = 4, logger = None): 
         self.logger = logger
         
         # self.api_key = os.getenv('NCBI_API_KEY')
@@ -37,6 +37,7 @@ class PubMedClient:
         async wrapper around metapub implementation of the PubMed API 
         '''
         
+        self.pubmed_retrieval = 'pmid'
         date_list = ConvenienceFunc(logger=self.logger).date_range_generator()
 
         #for every date batch create a task and add to queue 
@@ -49,7 +50,7 @@ class PubMedClient:
 
         #create async tasks 
         worker_tasks = [
-            asyncio.create_task(self._worker_task()) for _ in range(self.max_concurrent_requests)
+            asyncio.create_task(self._worker_task(client_function = self.async_retrieve_pubmed_data)) for _ in range(self.max_concurrent_requests)
         ]
 
         all_results = list() 
@@ -82,20 +83,19 @@ class PubMedClient:
             return pd.Series()
         
     
-    async def _worker_task(self): 
+    async def _worker_task(self, client_function): 
         '''
         Worker task to process a single date range and return results, depending on queue and concurrency limits 
         '''
 
         while True: 
             try: 
-                #check if we should kill the worker 
-                if self.task_queue.empty(): 
-                    break 
-                
                 #grab available task 
                 try: 
-                    date_range, query = await asyncio.wait_for(self.task_queue.get(), timeout=60)
+                    if self.pubmed_retrieval == 'pmid': 
+                        date_range, query = await asyncio.wait_for(self.task_queue.get(), timeout=60)
+                    if self.pubmed_retrieval == 'article_details': 
+                        pmid = await asyncio.wait_for(self.task_queue.get(), timeout=60)
 
                 except asyncio.TimeoutError: 
                     self.logger.warning('Timeout waiting for task - skipping')
@@ -103,11 +103,15 @@ class PubMedClient:
                 
                 try: 
                     #process the task 
-                    results = await self.async_retrieve_pubmed_data(date_range, query)
-                    if results: 
+                    if self.pubmed_retrieval == 'pmid': 
+                        results = await client_function(date_range, query)
                         await self.result_queue.put((date_range, results))
+
+                    if self.pubmed_retrieval == 'article_details': 
+                        results = await client_function(pmid)
+                        await self.result_queue.put(results)
+                    if results: 
                         remaining = self.task_queue.qsize()
-                        self.logger.info('Task completed.')
                         self.logger.info(f'Status: {remaining} tasks remaining')
 
                 except Exception as e: 
@@ -171,6 +175,103 @@ class PubMedClient:
             raise
 
         return results 
+    
+
+    async def async_retrieve_pubmed_article_data(self, pmid: str): 
+
+        retries = 0
+        while retries < self.max_retries: 
+            try: 
+                async with self.request_semaphore: 
+                    self.logger.info(f'Sending PubMed Request with following params: PMID: {pmid}')
+                    result = await asyncio.to_thread(self.pubmed_fetcher.article_by_pmid, pmid)
+                return result 
+            
+            except MetaPubError as e: 
+                self.logger.error(f"Caught MetaPubError: {str(e)}, attempt number: {retries + 1}")
+                retries += 1
+                if retries >= self.max_retries: 
+                    self.logger.error(f"Failed to retrieve article details for PMID: {pmid} after {self.max_retries} retries. Error: {str(e)}")
+                    return {"pmid": pmid, "error": str(e)}
+                await asyncio.sleep(2**retries)
+            except Exception as e: 
+                self.logger.error(f"Unexpected error: {str(e)}")
+                self.logger.error(f"Traceback:\n{traceback.format_exc()}")
+                return {"pmid": pmid, "error": f"Unexpected error: {str(e)}"}
+
+        
+    
+    async def get_pubmed_article_details(self, pmid_list: List[str], batch_size: int = 1000): 
+        '''
+        Async retrieve article details for a list of PMIDs 
+        '''
+        self.pubmed_retrieval = 'article_details'
+        worker_tasks = [
+                asyncio.create_task(self._worker_task(client_function = self.async_retrieve_pubmed_article_data)) for _ in range(self.max_concurrent_requests)
+            ]
+        
+        all_results = []
+        for i in range(0, len(pmid_list), batch_size):
+            batch = pmid_list[i:i + batch_size]
+            for pmid in batch:
+                await self.task_queue.put(pmid)
+        
+            task_count = self.task_queue.qsize()
+            self.logger.info(f'Starting task queue for PubMed Article Details retrieval. {task_count} tasks to complete for batch: {i} to {i + batch_size}')
+
+        #create a maximum number of workers tasks available to be used 
+
+            complete_tasks = 0 
+            batch_results = []
+            while complete_tasks < task_count: 
+                try: 
+                    result = await self.result_queue.get()
+                    if result: 
+                        batch_results.append(result)
+                        complete_tasks += 1
+                        self.logger.info(f'Completed {complete_tasks} of {task_count} tasks. Current batch: {i} to {i + batch_size}')
+
+                except Exception as e: 
+                    self.logger.error(f'Error processing results: {e}')
+
+            self.logger.info(f'All tasks for current batches arte complete')
+            all_results.extend(batch_results)
+                    # Log the status of worker tasks
+            for idx, task in enumerate(worker_tasks):
+                self.logger.info(f'Worker task {idx} status: {task._state}')
+
+
+        #cancell all worker tasks now that all tasks and batches are complete 
+        for task in worker_tasks: 
+            task.cancel()
+
+        #wait for all worker tasks to complete cancellation 
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+        if len(all_results) > 0: 
+            #unpack article details 
+            all_results_dct_list = [
+                {
+                    'pmid': getattr(result, 'pmid', None), 
+                    'title': getattr(result, 'title', None), 
+                    'abstract': getattr(result, 'abstract', None), 
+                    'publication_year': getattr(result, 'year', None)
+                } for result in all_results
+            ]
+
+            return pd.DataFrame(all_results_dct_list)
+        else: 
+            return pd.DataFrame()
+
+
+
+
+
+
+
+
+
+
 
 
 
