@@ -14,7 +14,8 @@ class oa_overarching_search:
         self.logger = LoggerConfig.setup_logger(logger_name='oa_overarching_search')
         self.results_path = Path(__file__).parent / 'search_results' / 'openalex' / 'overarching' / 'topic_search'
         self.results_path.mkdir(parents=True, exist_ok=True)
-
+        self.search_eval_cls = search_evaluation('oa', 'overarching', vector_search = False, logger=self.logger, strategy_type='topic_search')
+        self.consolidated_results_path = self.search_eval_cls.consolidated_results_path
     async def oa_overarching_search(self, topic_id_list : list): 
 
         async with OpenAlexClient(logger=self.logger) as oa_client: 
@@ -43,11 +44,15 @@ class oa_overarching_search:
     async def oa_overarching_search_eval_pipeline(self):  
         
         oa_topicsearch_builder_cls = oa_topicsearch_builder(logger=self.logger)
-        await oa_topicsearch_builder_cls.retrieve_oa_topics()
-        topic_id_list = oa_topicsearch_builder_cls.generate_openalex_topicsearch_ids()
-        await self.oa_overarching_search(topic_id_list) 
-        search_eval_cls = search_evaluation('oa', 'overarching', vector_search = False, logger=self.logger, strategy_type='topic_search')
-        evalmetrics_df = search_eval_cls.run_eval_pipeline()
+        if not self.consolidated_results_path.exists(): 
+            self.logger.info('No consolidated results found, retrieving topics and running search')
+            await oa_topicsearch_builder_cls.retrieve_oa_topics()
+            topic_id_list = oa_topicsearch_builder_cls.generate_openalex_topicsearch_ids()
+            await self.oa_overarching_search(topic_id_list) 
+            evalmetrics_df = self.search_eval_cls.run_eval_pipeline()
+        elif self.consolidated_results_path.exists(): 
+            self.logger.info('Consolidated results found, running evaluation')
+            evalmetrics_df = self.search_eval_cls.run_eval_pipeline()
         return evalmetrics_df
 
 if __name__ == '__main__': 

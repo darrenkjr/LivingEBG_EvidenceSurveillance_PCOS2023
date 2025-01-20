@@ -14,7 +14,7 @@ from pathlib import Path
 def main(): 
     #parse ris files for overarhcing
     total_evalmetrics_df = pd.DataFrame()
-    eval_results_path = Path(__file__).parent / 'evaluation_results' / 'overall' / 'overarching'
+    eval_results_path = Path(__file__).parent / 'evaluation_results' / 'overall' 
     eval_results_path.mkdir(parents=True, exist_ok=True)
 
     pubmed_overarching_search_cls = pubmed_overarching_search()
@@ -40,8 +40,13 @@ def main():
         evalmetrics_df = embmedline_ris_pipeline_cls.ris_eval_pipeline()
         total_evalmetrics_df = pd.concat([total_evalmetrics_df, evalmetrics_df], ignore_index=True)
 
-    #save total evalmetrics_df
-    total_evalmetrics_df.to_csv(f'{eval_results_path}/overall_evalmetrics_df.csv', index=False)
+    include_header = True
+    total_evalmetrics_df.to_csv(
+        eval_results_path / 'overall_evalmetrics_df.csv',  # path is the first positional argument
+        mode='a',  # append mode
+        header=not (eval_results_path / 'overall_evalmetrics_df.csv').exists() if include_header else False,
+        index=False
+    )
 
 
 if __name__ == '__main__': 

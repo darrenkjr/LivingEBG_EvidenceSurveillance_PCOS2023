@@ -16,6 +16,8 @@ class pubmed_overarching_search:
         self.results_path.mkdir(parents=True, exist_ok=True)
         self.pmid_path = self.results_path / f'pubmed_booleankw_ovearching_search_results_pmid.parquet'
         self.article_details_path = self.results_path / f'pubmed_booleankw_ovearching_search_results.parquet'
+        self.search_eval_cls = search_evaluation('pubmed', 'overarching', vector_search = False,logger=self.logger)
+        self.consolidated_results_path = self.search_eval_cls.consolidated_results_path
 
     async def pubmed_overarching_search(self, query: str): 
         pmed_client = PubMedClient(logger = self.logger)
@@ -42,14 +44,13 @@ class pubmed_overarching_search:
 
 
     async def pubmed_ovarching_search_eval_pipeline(self, query: str): 
-        search_eval_cls = search_evaluation('pubmed', 'overarching', vector_search = False,logger=self.logger)
-        consolidated_results_path = search_eval_cls.consolidated_results_path
-        if consolidated_results_path.exists(): 
+        
+        if self.consolidated_results_path.exists(): 
             self.logger.info(f'Consolidated results already exist')
-            evalmetrics_df = search_eval_cls.run_eval_pipeline()
-        else: 
+            evalmetrics_df = self.search_eval_cls.run_eval_pipeline()
+        elif not self.consolidated_results_path.exists(): 
             await self.pubmed_overarching_search(query)
-            evalmetrics_df = search_eval_cls.run_eval_pipeline()
+            evalmetrics_df = self.search_eval_cls.run_eval_pipeline()
         return evalmetrics_df
 
 if __name__ == '__main__': 
