@@ -4,9 +4,10 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os 
 from dotenv import load_dotenv
 load_dotenv()
+os.environ['PGHOST'] = '/var/run/postgresql'
 
 
-def create_basic_tables(db_name, user, pwd, host='localhost', port='5432'): 
+def create_basic_tables(db_name, user, pwd, host, port='5432'): 
     conn = psycopg2.connect(dbname=db_name, user=db_user, password=db_pwd)
     cur = conn.cursor()
     cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
@@ -26,7 +27,7 @@ def create_basic_tables(db_name, user, pwd, host='localhost', port='5432'):
     conn.close()
 
 
-def create_database(db_name, user, pwd, host='localhost', port='5432'): 
+def create_database(db_name, user, pwd, host, port='5432'): 
 
     print('Connecting to default database')
     conn = psycopg2.connect(dbname='postgres', user=user, password=pwd, host=host, port=port)
@@ -45,11 +46,13 @@ def create_database(db_name, user, pwd, host='localhost', port='5432'):
     cur.close()
     conn.close()
 
-db_name = os.getenv('db_name')
-db_user = os.getenv('db_user')
-db_pwd = os.getenv('db_pwd')
-
-create_basic_tables(db_name, db_user, db_pwd, host='localhost', port='5432')
+db_name = os.getenv('DB_NAME')
+db_user = os.getenv('DB_USER')
+db_pwd = os.getenv('DB_PWD')
+db_host = os.getenv('DB_HOST')
+print(db_name, db_user, db_pwd)
+create_database(db_name, db_user, db_pwd, db_host, port='5432')
+create_basic_tables(db_name, db_user, db_pwd, db_host, port='5432')
 
 #check if tables exist 
 
