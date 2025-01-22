@@ -35,10 +35,11 @@ class search_evaluation:
     } 
 
     question_id_mappings = {
-        '1.5.1/1.5.2' : '1.5',
-        '1.4.1/1.4.2' : '1.4',
-        '2.1.1/2.1.2' : '2.1',
-        '4.2/4.3' : '4.2.4.3.combined'
+        '4.2.4.3.combined' : '4.2/4.3', 
+        '1.5' : '1.5.1/1.5.2', 
+        '1.4' : '1.4.1/1.4.2', 
+        '2.1' : '2.1.1/2.1.2', 
+        '1.9.1.embase' : '1.9.1', 
     }
 
     def __init__(self, database: str, search_type: str, vector_search: bool = False, logger = None, strategy_type = 'boolkw_search'): 
@@ -97,7 +98,7 @@ class search_evaluation:
                                         .str.lower()
                                         .str.strip())
         
-        self.logger.info(f"Processed {mask.sum()} non-empty IDs out of {len(_df)} total entries")
+        self.logger.info(f"Processed {mask.sum()} non-empty IDs out of {len(_df)} total entries for ground truth articles")
         return _df
     
     def _load_eval_groundtruth(self): 
@@ -109,7 +110,7 @@ class search_evaluation:
                                         .str.lower()
                                         .str.strip())
         
-        self.logger.info(f"Processed {mask.sum()} non-empty IDs out of {len(_df)} total entries")
+        self.logger.info(f"Processed {mask.sum()} non-empty database specific IDs out of {len(_df)} total entries for evaluation articles (articles newly added to guideline in 2017)")
         return _df
     
     def _load_gold_set(self): 
@@ -120,7 +121,7 @@ class search_evaluation:
                                         .str.lower()
                                         .str.strip())
         
-        self.logger.info(f"Processed {mask.sum()} non-empty IDs out of {len(_df)} total entries")
+        self.logger.info(f"Processed {mask.sum()} non-empty IDs out of {len(_df)} total entries for gold set articles")
         return _df
     
     def _load_overarching_search_results(self): 
@@ -135,7 +136,7 @@ class search_evaluation:
         #check if consolidated results path exists no need to do load again 
         if self.consolidated_results_path.exists(): 
             self.logger.info(f'Consolidated results already exist, loading from {str(self.consolidated_results_path)}')
-            self.results_df = pd.read_parquet(self.consolidated_results_path)
+            results_df = pd.read_parquet(self.consolidated_results_path)
 
         else: 
             result_df = pd.DataFrame()
@@ -183,9 +184,10 @@ class search_evaluation:
                 
             self.logger.info(f'Filtering results for year range {self.start_year_cutoff} to {self.end_year_cutoff}')
             _result_df = result_df.query(f'publication_year >= {self.start_year_cutoff} & publication_year <= {self.end_year_cutoff}')
-            self.results_df = _result_df.copy()
-            self.results_df.to_parquet(self.consolidated_results_path)
+            results_df = _result_df.copy()
+            results_df.to_parquet(self.consolidated_results_path)
             self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
+            return results_df
 
     
     def _load_topic_specific_search_results(self): 
@@ -195,54 +197,61 @@ class search_evaluation:
         #check if cosonolidated results path arlready exists 
         
         if self.consolidated_results_path.exists(): 
-            self.results_df = pd.read_parquet(self.consolidated_results_path)
-            self.logger.info(f'Consolidated search results already exists, loading from {str(self.consolidated_results_path)}')
-            return
-
+            results_df = pd.read_parquet(self.consolidated_results_path)
+            results_df = self._standardize_results(results_df)
         else: 
-            self.eval_groundtruth_df['question_id'] = self.eval_groundtruth_df['question_id'].map(lambda x: self.question_id_mappings.get(x, x))
+            self.logger.info(f'Consolidated search results do not exist, loading from {str(self.search_results_path)}')
+
+            # self.eval_groundtruth_df['question_id'] = self.eval_groundtruth_df['question_id'].map(lambda x: self.question_id_mappings.get(x, x))
             valid_question_id = list(self.eval_groundtruth_df['question_id'].unique())
-            self.results_df = pd.DataFrame()
+            results_df = pd.DataFrame()
 
             for file in self.search_results_path.iterdir(): 
                 if file.suffix == '.ris': 
                     # Do all string operations in one line
                     current_question_id = file.stem.rsplit('_', 1)[0].replace('gdg', '').replace('_', '.')
+                    self.logger.info(f'Processing current detected question id:: {current_question_id}')
+                    if current_question_id == '.4.9' or current_question_id in self.question_id_mappings: 
+                        self.logger.warning(f'Question id requiring mapping detected : {current_question_id}, mapping to {self.question_id_mappings[current_question_id]}')
+                        current_question_id = self.question_id_mappings[current_question_id]
                     #read current file 
                     with open(file, 'r', encoding='utf-8') as f: 
                             df = pd.DataFrame(rispy.load(f, skip_unknown_tags = True))
                             df['question_id'] = current_question_id
-                            self.results_df = pd.concat([self.results_df, df], ignore_index=True)
+                            results_df = pd.concat([results_df, df], ignore_index=True)
             
-            self.results_df.to_parquet(self.consolidated_results_path)
+            results_df = self._standardize_results(results_df)
+            results_df.to_parquet(self.consolidated_results_path)
             self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
             
-            
-            try:    
-                assert set(valid_question_id).issubset(set(self.results_df['question_id'].unique())), \
-                    f"Found invalid question IDs: {set(valid_question_id) - set(self.results_df['question_id'].unique())}"
-                    
-            except AssertionError: 
-                self.logger.error('Found invalid question ids between results and input ground truth dataframes. Might want to recheck results from search retrieval.')
-                raise
+
+        return results_df
+
+    def _standardize_results(self, df):    # Clean IDs
+        if self.result_id_col in df.columns:
+            df[self.result_id_col] = df[self.result_id_col].astype(str).str.lower().str.strip()
+        return df 
+    
 
 
-    def process_search_results(self): 
+    def process_search_results(self, results_df): 
         '''
         Evaluates search results, saves matched and missed results, and returns evaluation metrics
         
         '''
-        self.results_df[self.result_id_col] = self.results_df[self.result_id_col].str.lower()
+        results_df[self.result_id_col] = results_df[self.result_id_col].str.lower()
         if self.database == 'oa': 
             #remove leading 'https://openalex.org/' from result_id_col
-            self.results_df[self.result_id_col] = self.results_df[self.result_id_col].str.replace('https://openalex.org/', '')
+            results_df[self.result_id_col] = results_df[self.result_id_col].str.replace('https://openalex.org/', '')
 
         evalmetrics_df = pd.DataFrame()
-        match_results_df, missed_results_df = self._evaluate_matches(self.eval_groundtruth_df, self.results_df)
+        self.logger.info(f'Evaluating matches for {self.database} {self.search_type} {self.strategy_type} {self.vector_search_flag}')
+
+        match_results_df, missed_results_df = self._evaluate_matches(self.eval_groundtruth_df, results_df)
 
         #overall metrics 
         self.question_id = 'overall'
-        metrics_groundtruth = self.calc_eval_metrics(match_results_df, self.eval_groundtruth_df, self.results_df)
+        metrics_groundtruth = self.calc_eval_metrics(match_results_df, self.eval_groundtruth_df, results_df)
         metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
         metrics_groundtruth_df['performance_on'] = 'groundtruth_2017edition'
         metrics_groundtruth_df['question_id'] = self.question_id
@@ -261,7 +270,7 @@ class search_evaluation:
         #     grouped_evalmetrics_df = pd.DataFrame()
         #     for question_id, grouped_groundtruth_df in self.eval_groundtruth_df.groupby('question_id'): 
         #         self.question_id = question_id
-        #         grouped_df = self.results_df[self.results_df['question_id'] == question_id]
+        #         grouped_df = results_df[results_df['question_id'] == question_id]
         #         match_results_df, missed_results_df = self._evaluate_matches(grouped_groundtruth_df, grouped_df)
         #         metrics_groundtruth = self.calc_eval_metrics(match_results_df, grouped_groundtruth_df, grouped_df)
         #         metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
@@ -296,10 +305,12 @@ class search_evaluation:
         
         results_df['clean_id'] = results_df[self.result_id_col].astype(str).str.lower().str.strip()
         comparison_df['clean_id'] = comparison_df[self.eval_id_col].astype(str).str.lower().str.strip()
+        # Log after cleaning
+        self.logger.info(f"Comparison / evaluation set - Total: {len(comparison_df)}, Unique IDs: {comparison_df['clean_id'].nunique()}")
 
         #drop duplicate before matching 
         results_df_dedupe = results_df.drop_duplicates(subset = 'clean_id')
-        
+        self.logger.info(f'Evaluating based on {self.result_id_col} in results df, and {self.eval_id_col} in comparison df')
         # Find matches using merge
         matched_results_df = pd.merge(
             comparison_df,
@@ -313,6 +324,11 @@ class search_evaluation:
         missed_results_df = comparison_df[
             ~comparison_df['clean_id'].isin(matched_results_df['clean_id'])
         ]
+
+            
+    # Validate
+        assert len(matched_results_df) + len(missed_results_df) == len(comparison_df), \
+            f"Total rows don't match: {len(matched_results_df)} + {len(missed_results_df)} != {len(comparison_df)}"
         
         # Log results
         self.logger.info(f"Total matches found: {len(matched_results_df)}")
@@ -390,11 +406,12 @@ class search_evaluation:
 
         #also save as csv for troubleshooting (missed reuslts only)
         missed_results_df.to_csv(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
-
+        #matched results to csv 
+        match_results_df.to_csv(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
     def run_eval_pipeline(self): 
         if self.search_type == 'overarching': 
-            self._load_overarching_search_results()
+            result_df = self._load_overarching_search_results()
         elif self.search_type == 'topic_specific': 
-            self._load_topic_specific_search_results()
+            result_df = self._load_topic_specific_search_results()
         
-        return self.process_search_results()
+        return self.process_search_results(result_df)
