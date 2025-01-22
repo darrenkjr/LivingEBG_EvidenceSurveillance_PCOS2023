@@ -477,6 +477,5 @@ if __name__ == '__main__':
     sql_instance.migrate_gdg_data()
     sql_instance.migrate_ground_truth_data()
     sql_instance.migrate_search_strategies()
-    sql_instance.migrate_search_results()
     sql_instance.migrate_search_result_articles()
     # sql_instance.migrate_search_result_data()
