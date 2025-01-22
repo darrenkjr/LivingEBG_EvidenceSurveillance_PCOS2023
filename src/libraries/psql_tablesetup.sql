@@ -59,12 +59,6 @@ CREATE TABLE search_strategies (
 
 -- 4th level tables 
 
--- joining table 
-CREATE TABLE search_results (
-    search_result_id INT PRIMARY KEY, 
-    search_strategy_id INT REFERENCES search_strategies(search_strategy_id)
-    );
-
 CREATE TABLE evaluation_results (
     evaluation_result_id INT PRIMARY KEY, 
     search_strategy_id INT REFERENCES search_strategies(search_strategy_id), 
@@ -77,7 +71,7 @@ CREATE TABLE evaluation_results (
 
 CREATE TABLE search_result_articles (
     search_result_article_id INT PRIMARY KEY, 
-    search_result_id INT REFERENCES search_results(search_result_id), 
+    search_strategy_id INT REFERENCES search_strategies(search_strategy_id);
     title TEXT, 
     abstract TEXT, 
     publication_year INT,
@@ -99,16 +93,10 @@ REFERENCES evidence_reviews(evidence_review_id)
 ON DELETE RESTRICT  -- Prevent deletion of evidence review if it has strategies
 ON UPDATE RESTRICT;
 
-ALTER TABLE search_results 
+
+ALTER TABLE search_result_articles 
 ADD CONSTRAINT fk_search_strategy 
 FOREIGN KEY (search_strategy_id) 
 REFERENCES search_strategies(search_strategy_id)
-ON DELETE RESTRICT  -- Prevent deletion of strategy if it has results
-ON UPDATE RESTRICT;
-
-ALTER TABLE search_result_articles 
-ADD CONSTRAINT fk_search_result 
-FOREIGN KEY (search_result_id) 
-REFERENCES search_results(search_result_id)
-ON DELETE RESTRICT  -- Prevent deletion of results if they have articles
+ON DELETE RESTRICT
 ON UPDATE RESTRICT;

@@ -251,6 +251,7 @@ class ConvenienceFunc:
         known_question_ids_no_new_articles = {'5.7.5', '5.7.1'}
         try: 
             assert set(groundtruth_eval_df['question_id'].unique()) == set(groundtruth_df['question_id'].unique()), f'Some question_ids are missing from the ground truth dataframe: {set(groundtruth_df["question_id"].unique()) - set(groundtruth_eval_df["question_id"].unique())}'
+        
         except AssertionError as e: 
             missing_question_ids = set(groundtruth_df['question_id'].unique()) - set(groundtruth_eval_df['question_id'].unique())
             if missing_question_ids == known_question_ids_no_new_articles: 

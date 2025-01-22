@@ -11,7 +11,6 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from libraries.logging_config import LoggerConfig
 
-os.environ['PGHOST'] = '/var/run/postgresql'
 
 class sql_data_migration:
 
@@ -54,6 +53,8 @@ class sql_data_migration:
             }
 
             self.consolidated_results_path = Path(__file__).parent.parent / 'consolidated_results'
+
+            self.current_article_id  = 1
 
         except Exception as e:
             print(f"Error connecting to database: {e}")
@@ -232,15 +233,13 @@ class sql_data_migration:
         searchstrat_year_end_insert = []
         evidence_review_id_insert = []
         search_strategy_id_insert = []
-        with self.engine.connect() as conn:
-            result = conn.execute(text("SELECT COALESCE(MAX(search_strategy_id), 0) FROM search_strategies"))
-            search_strategy_id_count = result.scalar() + 1
+
 
         self.filename_mapping = {}
 
-
+        search_strategy_id_count = 1 
         for file in self.consolidated_results_path.iterdir():
-
+            
             if str(file).endswith('.parquet'): 
                 #split filename 
                 self.filename_mapping[file.name] = {
@@ -248,11 +247,11 @@ class sql_data_migration:
                     'search_strategy_id': search_strategy_id_count
                 }
                 file_name = file.name.split('_')
-                database = file_name[0]
-                if database == 'oa': 
-                    database = 'openalex'
+                self.database_name = file_name[0]
+                if self.database_name == 'oa': 
+                    self.database_name = 'openalex'
                 search_type_name = file_name[1]
-                if search_type_name == 'topicspecific': 
+                if search_type_name == 'topic': 
                     search_type = 'topic-specific'
                 elif search_type_name == 'overarching': 
                     search_type = 'overarching'
@@ -260,24 +259,52 @@ class sql_data_migration:
                     self.logger.error(f"Error: search type {search_type_name} not found")
                 
                 search_strategy_type_name = '_'.join([file_name[3],file_name[4]])
-                if search_strategy_type_name == 'boolkw_search': 
+                if search_strategy_type_name == 'boolkw_search' or 'consolidated_boolkw': 
                     search_strategy_type = 'boolean-kw'
                 elif search_strategy_type_name == 'topic_search': 
                     search_strategy_type = 'openalex-topic-search'
 
-                if search_type_name == 'overarching': 
+                if search_type == 'overarching': 
+                    current_id = search_strategy_id_count
                     searchstrat_year_start_insert.append(1990)
                     searchstrat_year_end_insert.append(2020)
                     evidence_review_id_insert.append('overall')
-                    search_strategy_id_insert.append(search_strategy_id_count)
-                    search_strategy_id_count += 1
-                    database_insert.append(database)
+                    search_strategy_id_insert.append(current_id )
+                    database_insert.append(self.database_name)
                     search_types_insert.append(search_type)
                     search_strategy_types_insert.append(search_strategy_type)
+                    search_strategy_id_count += 1
+                    if file.name == 'oa_overarching_consolidated_topic_search_results.parquet': 
+                        self.logger.warning(f"Skipping {file.name} as its too large")
+                    else: 
+                        search_result_df = pd.read_parquet(file)
+                        self.migrate_search_result_articles(search_strategy_id_count, search_result_df)
 
-                elif search_type_name == 'topicspecific': 
+                elif search_type == 'topic-specific': 
                     _df = pd.read_parquet(file)
+                    _df.rename(columns = {
+                        'question_id' : 'evidence_review_id'
+                    }, inplace=True)
+                    #fix evidence review id 
+                    input_evidence_review_id_mapping = {
+                        '4.2.4.3.combined' : '4.2/4.3', 
+                        '1.4' : '1.4.1/1.4.2', 
+                        '1.5' : '1.5.1/1.5.2', 
+                        '2.1' : '2.1.1/2.1.2', 
+                        '1.9.1.embase' : '1.9.1', 
+                    }
+                    _df['evidence_review_id'] = _df['evidence_review_id'].map(lambda x : input_evidence_review_id_mapping[x] if x in input_evidence_review_id_mapping else x)
                     evidence_review_id = pd.Series(_df['evidence_review_id'].unique())
+                    #check that evidence review id is in the evidence review table 
+                    with self.engine.connect() as conn: 
+                        result = conn.execute(text("SELECT evidence_review_id FROM evidence_reviews"))
+                        existing_evidence_review_ids = [row[0] for row in result.fetchall()]
+                    if not set(evidence_review_id).issubset(set(existing_evidence_review_ids)): 
+                        #extract evidence review ids that are not in the evidence review table 
+                        missing_evidence_review_ids = set(evidence_review_id) - set(existing_evidence_review_ids)
+                        self.logger.error(f"Error: Input search strategy assiociated with evidence review id: {missing_evidence_review_ids} not found in evidence review table")
+                        raise ValueError(f"Error: Input search strategy assiociated with evidence review id: {missing_evidence_review_ids} not found in evidence review table")
+
                     # Create a temporary dataframe with ordered IDs
                     temp_df = pd.DataFrame({'evidence_review_id': evidence_review_id})
 
@@ -289,13 +316,15 @@ class sql_data_migration:
                     n_entries = len(evidence_review_id)
                     search_strategy_id_insert.extend(range(search_strategy_id_count, search_strategy_id_count + n_entries))
                     search_strategy_id_count += n_entries
-                    database_insert.extend([database] * n_entries)
+                    database_insert.extend([self.database_name] * n_entries)
                     search_types_insert.extend([search_type] * n_entries)
                     search_strategy_types_insert.extend([search_strategy_type] * n_entries)
                     searchstrat_year_start_insert.extend(_er_extract['searchstrat_year_start'].tolist())
                     searchstrat_year_end_insert.extend(_er_extract['searchstrat_year_end'].tolist())
                     evidence_review_id_insert.extend(_er_extract['evidence_review_id'].tolist())
-
+                    #update search strategy id count 
+                    search_strategy_id_count += n_entries
+                    self._handle_topic_specific_search(search_strategy_id_insert, evidence_review_id_insert, file)
 
             #map database to ids 
         database_id = [
@@ -330,7 +359,6 @@ class sql_data_migration:
 
         search_strategies_df['searchdetail_file_path'] = 'placeholder'
 
-
         #check columns 
         if self._df_sqltable_column_check(search_strategies_df, table_name): 
             filtered_search_strategies_df = self._prior_id_check(search_strategies_df, 'search_strategy_id', table_name)
@@ -341,41 +369,23 @@ class sql_data_migration:
             else: 
                 self.logger.info(f"No new search strategies to insert")
 
-    def migrate_search_results(self): 
+    def _handle_topic_specific_search(self, search_strategy_id_list, evidence_review_id_list, file): 
 
-        table_name = 'search_results'   
-        search_result_id = 1
-        search_result_id_insert = []
-        search_strategy_id_insert = []
-        self.result_article_id_mapping = {} 
+        for search_strategy_id, evidence_review_id in zip(search_strategy_id_list, evidence_review_id_list):
+            df = pd.read_parquet(file)
+            group_df = df.query(f"question_id == '{evidence_review_id}'")
+            self.migrate_search_result_articles(search_strategy_id, group_df)
 
-        for file in self.consolidated_results_path.iterdir(): 
-            if str(file).endswith('.parquet'): 
-                #split filename 
-                file_name = file.name.split('_')
-                search_strategy_id = self.filename_mapping[file.name]['search_strategy_id']
-                search_result_id += 1
-                search_result_id_insert.append(search_result_id)
-                search_strategy_id_insert.append(search_strategy_id) 
-                self.result_article_id_mapping[file.name] = {
-                    'file_path': file, 
-                    'search_result_id': search_result_id
-                }
-
-        search_result_df = pd.DataFrame({
-            'search_result_id' : search_result_id_insert, 
-            'search_strategy_id' : search_strategy_id_insert
-        })
-        if self._df_sqltable_column_check(search_result_df, table_name): 
-            filtered_search_result_df = self._prior_id_check(search_result_df, 'search_result_id', table_name)
-            filtered_search_result_df.to_sql(table_name, self.engine, if_exists='append', index=False)
-
-    def migrate_search_result_articles(self): 
-        table_name = 'search_result_articles'
+    def _grab_latest_search_result_article_id(self): 
+                # Get  current max ID from database if exists
         with self.engine.connect() as conn:
             result = conn.execute(text("SELECT COALESCE(MAX(search_result_article_id), 0) FROM search_result_articles"))
-            next_article_id = result.scalar() + 1
-            
+            self.current_article_id = result.scalar() + 1
+    
+    def migrate_search_result_articles(self, search_strategy_id_count, search_result_article_df): 
+        
+        table_name = 'search_result_articles'
+
         db_id_mappings = {
             db: col for db, col in zip(
                 self.database_id_mapping['database'],
@@ -383,45 +393,74 @@ class sql_data_migration:
             )
         }
 
-        for file in self.consolidated_results_path.iterdir():
-            if str(file).endswith('.parquet'): 
-                if file.name == 'oa_overarching_consolidated_topic_search_results.parquet': 
-                    #skip as its too large 
-                    self.logger.warning(f"Skipping {file.name} as its too large")
-                    continue 
-                else: 
-                    database = file.name.split('_')[0]
-                    if database == 'oa': 
-                        database = 'openalex'
-                    idcol = db_id_mappings.get(database)
-                    if not idcol:
-                        self.logger.error(f"Unknown database: {database}")
-                        raise ValueError(f"Unknown database: {database}")
-                    
-                    search_result_id = self.result_article_id_mapping[file.name]['search_result_id']
-                    self.logger.info(f'Reading file: {str(file.name)}')
-                    _df = pd.read_parquet(file)
+        idcol = db_id_mappings.get(self.database_name)
+        if not idcol:
+            self.logger.error(f"Unknown database: {self.database_name}")
+            raise ValueError(f"Unknown database: {self.database_name}")
+        
+        if self.database_name == 'embase' or self.database_name == 'medline': 
+            search_result_article_df.rename(columns = {
+                'primary_title' : 'title', 
+                'notes_abstract' : 'abstract',
+            }, inplace=True)
 
-                    if database == 'embase' or 'medline': 
-                        _df.rename(columns = {
-                            'primary_title' : 'title', 
-                            'notes_abstract' : 'abstract',
-                        }, inplace=True)
+        _extract = search_result_article_df[[idcol, 'title', 'abstract', 'publication_year']].copy()
+        _extract.rename(columns = {idcol : 'original_id'}, inplace=True)
+        _extract['search_strategy_id'] = search_strategy_id_count
 
-                    _extract = _df[[idcol, 'title', 'abstract', 'publication_year']].copy()
-                    _extract.rename(columns = {idcol : 'original_id'}, inplace=True)
-                    _extract['search_result_id'] = search_result_id
-                    #get search result id
-                    _extract['search_result_article_id'] = range(next_article_id, next_article_id + len(_extract))
-                    next_article_id += len(_extract)
+        #grab and update search result article id 
+        self._grab_latest_search_result_article_id()
+        _extract['search_result_article_id'] = range(self.current_article_id, self.current_article_id + len(_extract), 1)
+        
+        try:
+            _extract = self._clean_publication_year(_extract)
+        except Exception as e:
+            self.logger.error(f"Failed to clean publication years: {e}")
+            raise
 
-                    if self._df_sqltable_column_check(_extract, table_name): 
-                        filtered_df = self._prior_id_check(_extract, 'search_result_article_id', table_name)
-                        if not filtered_df.empty: 
-                            with self.engine.begin() as conn:
-                                filtered_df.to_sql(table_name, conn, if_exists='append', index=False, method='multi')
-                        else: 
-                            self.logger.info(f"No new search result articles to insert")
+        if self._df_sqltable_column_check(_extract, table_name): 
+            filtered_df = self._prior_id_check(_extract, 'search_result_article_id', table_name)
+            if not filtered_df.empty: 
+                try: 
+                    with self.engine.begin() as conn:
+                        filtered_df.to_sql(table_name, conn, if_exists='append', index=False, method='multi')
+                except Exception as e: 
+                    self.logger.error(f"Error inserting search result articles into database: {e}")
+                    raise e 
+            else: 
+                self.logger.info(f"No new search result articles to insert")
+
+    def _clean_publication_year(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Clean and standardize publication year column, handling various edge cases"""
+        df = df.copy()
+        
+        try:
+            # Step 1: Convert to string and clean
+            df['publication_year'] = (df['publication_year']
+                .astype(str)
+                .replace(['', 'nan', 'None', '//', 'NaT'], pd.NA)
+                .str.strip()
+            )
+            
+            # Step 2: Convert to numeric, coercing errors to NaN
+            df['publication_year'] = pd.to_numeric(df['publication_year'], errors='coerce')
+            
+            # Step 3: Convert to nullable integer
+            df['publication_year'] = df['publication_year'].astype('Int64')
+            
+            # Log results
+            total = len(df)
+            valid = df['publication_year'].notna().sum()
+            self.logger.info(f"Publication year cleaning results - Total: {total}, Valid: {valid}, Missing: {total-valid}")
+            
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"Error cleaning publication years: {e}")
+            # Show sample of problematic values
+            problem_values = df[df['publication_year'].notna()]['publication_year'].head()
+            self.logger.error(f"Sample of problematic values: {problem_values}")
+            raise
 
 
 if __name__ == '__main__':
