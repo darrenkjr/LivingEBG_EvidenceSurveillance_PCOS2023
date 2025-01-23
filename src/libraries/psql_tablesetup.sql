@@ -71,7 +71,7 @@ CREATE TABLE evaluation_results (
 
 CREATE TABLE search_result_articles (
     search_result_article_id INT PRIMARY KEY, 
-    search_strategy_id INT REFERENCES search_strategies(search_strategy_id);
+    search_strategy_id INT REFERENCES search_strategies(search_strategy_id),
     title TEXT, 
     abstract TEXT, 
     publication_year INT,

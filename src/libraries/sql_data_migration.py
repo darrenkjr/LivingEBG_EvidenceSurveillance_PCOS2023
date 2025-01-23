@@ -236,8 +236,11 @@ class sql_data_migration:
 
 
         self.filename_mapping = {}
-
         search_strategy_id_count = 1 
+        search_results_to_insert = []
+        topic_specific_search_results_to_insert = []
+
+
         for file in self.consolidated_results_path.iterdir():
             
             if str(file).endswith('.parquet'): 
@@ -278,7 +281,12 @@ class sql_data_migration:
                         self.logger.warning(f"Skipping {file.name} as its too large")
                     else: 
                         search_result_df = pd.read_parquet(file)
-                        self.migrate_search_result_articles(search_strategy_id_count, search_result_df)
+                        search_results_to_insert.append({
+                            'database_name' : self.database_name, 
+                            'search_strategy_id' : current_id, 
+                            'search_result_df' : search_result_df
+                        })
+                        
 
                 elif search_type == 'topic-specific': 
                     _df = pd.read_parquet(file)
@@ -315,7 +323,6 @@ class sql_data_migration:
                     
                     n_entries = len(evidence_review_id)
                     search_strategy_id_insert.extend(range(search_strategy_id_count, search_strategy_id_count + n_entries))
-                    search_strategy_id_count += n_entries
                     database_insert.extend([self.database_name] * n_entries)
                     search_types_insert.extend([search_type] * n_entries)
                     search_strategy_types_insert.extend([search_strategy_type] * n_entries)
@@ -324,7 +331,13 @@ class sql_data_migration:
                     evidence_review_id_insert.extend(_er_extract['evidence_review_id'].tolist())
                     #update search strategy id count 
                     search_strategy_id_count += n_entries
-                    self._handle_topic_specific_search(search_strategy_id_insert, evidence_review_id_insert, file)
+
+                    topic_specific_search_results_to_insert.append({
+                        'database_name' : self.database_name, 
+                        'search_strategy_id_list' : search_strategy_id_insert, 
+                        'evidence_review_id_list' : evidence_review_id_insert, 
+                        'file_path' : file
+                    })
 
             #map database to ids 
         database_id = [
@@ -369,12 +382,15 @@ class sql_data_migration:
             else: 
                 self.logger.info(f"No new search strategies to insert")
 
+        return search_results_to_insert, topic_specific_search_results_to_insert
+
     def _handle_topic_specific_search(self, search_strategy_id_list, evidence_review_id_list, file): 
 
         for search_strategy_id, evidence_review_id in zip(search_strategy_id_list, evidence_review_id_list):
             df = pd.read_parquet(file)
             group_df = df.query(f"question_id == '{evidence_review_id}'")
-            self.migrate_search_result_articles(search_strategy_id, group_df)
+            database_name = file.name.split('_')[0]
+            self.migrate_search_result_articles(search_strategy_id, group_df, database_name)
 
     def _grab_latest_search_result_article_id(self): 
                 # Get  current max ID from database if exists
@@ -382,7 +398,7 @@ class sql_data_migration:
             result = conn.execute(text("SELECT COALESCE(MAX(search_result_article_id), 0) FROM search_result_articles"))
             self.current_article_id = result.scalar() + 1
     
-    def migrate_search_result_articles(self, search_strategy_id_count, search_result_article_df): 
+    def migrate_search_result_articles(self, search_strategy_id_count, search_result_article_df, database_name): 
         
         table_name = 'search_result_articles'
 
@@ -392,6 +408,7 @@ class sql_data_migration:
                 self.database_id_mapping['idcol']
             )
         }
+        self.database_name = database_name
 
         idcol = db_id_mappings.get(self.database_name)
         if not idcol:
@@ -444,7 +461,6 @@ class sql_data_migration:
             
             # Step 2: Convert to numeric, coercing errors to NaN
             df['publication_year'] = pd.to_numeric(df['publication_year'], errors='coerce')
-            
             # Step 3: Convert to nullable integer
             df['publication_year'] = df['publication_year'].astype('Int64')
             
@@ -476,6 +492,9 @@ if __name__ == '__main__':
     sql_instance.fill_reference_tables()
     sql_instance.migrate_gdg_data()
     sql_instance.migrate_ground_truth_data()
-    sql_instance.migrate_search_strategies()
-    sql_instance.migrate_search_result_articles()
+    overarching_search_results_to_insert, topic_specific_search_results_to_insert = sql_instance.migrate_search_strategies()
+    for search_results in overarching_search_results_to_insert: 
+        sql_instance.migrate_search_result_articles(search_results['search_strategy_id'], search_results['search_result_df'], search_results['database_name'])
+    for search_results in topic_specific_search_results_to_insert: 
+        sql_instance._handle_topic_specific_search(search_results['search_strategy_id_list'], search_results['evidence_review_id_list'], search_results['file_path'])
     # sql_instance.migrate_search_result_data()
