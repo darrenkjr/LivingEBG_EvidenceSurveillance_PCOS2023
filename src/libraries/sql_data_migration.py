@@ -3,73 +3,191 @@ import psycopg2
 import os
 from dotenv import load_dotenv
 load_dotenv()
-from sqlalchemy import create_engine
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.types import Integer, VARCHAR
 from pathlib import Path
-from sql_tables_generation import create_database, create_basic_tables
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from libraries.logging_config import LoggerConfig
-
+import psycopg2
 
 class sql_data_migration:
 
-    def __init__(self, db_name, db_user, db_pwd, db_host, logger = None):
-        try:
+    def __init__(self, db_name, db_user, db_pwd, db_host, db_port, logger = None):
+
             # Create a SQLAlchemy engine
-            self.logger = logger
-            self.engine = create_engine(f'postgresql://{db_user}:{db_pwd}@localhost:5432/{db_name}')
-            self.logger.info(f"Connecting to database {db_name}")
-            with self.engine.connect() as conn:
-                    #check connections 
-                try: 
-                    conn.execute(text("SELECT 1"))  
-                    self.logger.info(f"Connection successful")
-                except Exception as e:
-                    self.logger.error(f"Error connecting to database: {e}")
 
-            self.gdg_data_path = Path(__file__).parent.parent / 'dataset' / '_superseded' / 'PCOS_Guideline_Dataset_checked.xlsm'
-            self.ground_truth_data_path = Path(__file__).parent.parent / 'dataset' / 'fullgroundtruth_valid_apimerge_df.parquet'
-            
-            self.database_mapping = {
-                'database_id' : [1, 2, 3, 4], 
-                'database_name' : ['pubmed', 'medline', 'embase', 'openalex'],
-                'free_api_available' : [True, False, True, True]
-            }
+        self.logger = logger
+        self.db_name = db_name
+        self.db_user = db_user
+        self.db_pwd = db_pwd
+        self.db_host = db_host
+        self.db_port = db_port
 
-            self.search_type_mapping = {
-                'search_type_id' : [1, 2], 
-                'name' : ['overarching', 'topic-specific']
-            }
 
-            self.search_strategy_type_mapping = {
-                'search_strategy_type_id' : [1, 2], 
-                'name' : ['boolean-kw', 'openalex-topic-search']
-            }
 
-            self.database_id_mapping = {
-                'database' : ['pubmed', 'medline', 'embase', 'openalex'], 
-                'idcol' : ['pmid', 'id', 'accession_number', 'id']
-            }
+        
+        self.engine  = self._create_database() 
+        
+        self.logger.info(f"Connecting to database {self.db_name}")
+        with self.engine.connect() as conn:
+                #check connections 
+            try: 
+                conn.execute(text("SELECT 1"))  
+                self.logger.info(f"Connection successful")
+            except Exception as e:
+                self.logger.error(f"Error connecting to database: {e}")
+        self.drop_all_tables_data()
 
-            self.consolidated_results_path = Path(__file__).parent.parent / 'consolidated_results'
+        self.gdg_data_path = Path(__file__).parent.parent / 'dataset' / '_superseded' / 'PCOS_Guideline_Dataset_checked.xlsm'
+        self.ground_truth_data_path = Path(__file__).parent.parent / 'dataset' / 'fullgroundtruth_valid_apimerge_df.parquet'
+        
+        self.database_mapping = {
+            'database_id' : [1, 2, 3, 4], 
+            'database_name' : ['pubmed', 'medline', 'embase', 'openalex'],
+            'free_api_available' : [True, False, True, True]
+        }
 
-            self.current_article_id  = 1
+        self.search_type_mapping = {
+            'search_type_id' : [1, 2], 
+            'name' : ['overarching', 'topic-specific']
+        }
 
-        except Exception as e:
-            print(f"Error connecting to database: {e}")
+        self.search_strategy_type_mapping = {
+            'search_strategy_type_id' : [1, 2], 
+            'name' : ['boolean-kw', 'openalex-topic-search']
+        }
 
-        # Check tables
+        self.database_id_mapping = {
+            'database' : ['pubmed', 'medline', 'embase', 'openalex'], 
+            'idcol' : ['pmid', 'id', 'accession_number', 'id']
+        }
+
+        self.consolidated_results_path = Path(__file__).parent.parent / 'consolidated_results'
+
+        self.current_article_id  = 1
+        self.topicsearch_pubyear_clean_flag = False
+        self.table_list = ['gdgs', 'databases', 'search_types', 'search_strategy_types', 'evidence_reviews', 'ground_truth_articles', 'search_strategies','search_result_articles', 'evaluation_results']
         self._check_tables()
 
-    def _check_tables(self):
-        with self.engine.connect() as conn:
-            self.logger.info(f"Checking existing tables")
-            result = conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';"))
-            tables = result.fetchall()
-        return tables
+        
 
+    def _create_database(self):
+        """Create database if it doesn't exist using pure SQLAlchemy"""
+        try:
+            # Connect to default postgres database
+            default_engine = create_engine(
+                f'postgresql://{self.db_user}:{self.db_pwd}@{self.db_host}:{self.db_port}/postgres'
+            )
+            
+            with default_engine.connect() as conn:
+                # Set isolation level to AUTOCOMMIT
+                conn.execution_options(isolation_level="AUTOCOMMIT")
+                
+                # Check if database exists
+                result = conn.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :db_name"),
+                    {"db_name": self.db_name}
+                )
+                
+                if not result.scalar():
+                    # Create database if it doesn't exist
+                    conn.execute(text(f"CREATE DATABASE {self.db_name}"))
+                    self.logger.info(f"Database {self.db_name} created")
+                else:
+                    self.logger.info(f"Database {self.db_name} already exists")
+                    
+        except Exception as e:
+            self.logger.error(f"Error creating database: {e}")
+            raise
+        finally:
+            # Ensure connection is closed
+            if 'default_engine' in locals():
+                default_engine.dispose()
+
+            #create self engine 
+            return create_engine(f'postgresql://{self.db_user}:{self.db_pwd}@{self.db_host}:{self.db_port}/{self.db_name}')
+
+    def _create_tables(self):
+        """Create database tables using SQLAlchemy if they don't exist"""
+        try:
+            with self.engine.begin() as conn:
+                # Check existing tables
+                result = conn.execute(text(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+                ))
+                #check table names 
+                tables = [row[0] for row in result]
+                if set(tables) == set(self.table_list): 
+                    self.logger.info(f"Tables already exist, table names: {tables}")
+                    return 
+
+                self.logger.info('No tables found, creating basic tables')
+                # Read SQL file
+                sql_code_path = Path(__file__).parent / 'psql_tablesetup.sql'
+                with open(sql_code_path, 'r') as file:
+                    sql_code = file.read()
+                
+
+                # Split and execute multiple statements
+                statements = sql_code.split(';')
+                for statement in statements:
+                    if statement.strip():
+                        conn.execute(text(statement))
+                
+                # Verify created tables
+                result = conn.execute(text(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+                ))
+                created_tables = [row[0] for row in result]
+                self.logger.info(f'Basic tables created, table names: {created_tables}')
+
+
+        except Exception as e:
+            self.logger.error(f'Error creating tables: {e}')
+            raise
+                
+
+    def _check_tables(self):
+        try:
+            with self.engine.begin() as conn:
+                # Get list of temporary tables (only do this once)
+                result = conn.execute(text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_name LIKE 'temp_%'"
+                ))
+                temp_tables = [row[0] for row in result]
+                
+                if temp_tables:
+                    self.logger.info(f"Found temporary tables: {temp_tables}")
+                    # Drop all temporary tables in a single transaction
+                    for table_name in temp_tables:
+                        conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
+                    self.logger.info(f"Successfully dropped {len(temp_tables)} temporary tables")
+                else:
+                    self.logger.info("No temporary tables found")
+
+
+                #check tables again 
+                result = conn.execute(text(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+                )) 
+
+                tables = [row[0] for row in result]
+                if set(tables) != set(self.table_list): 
+                    self.logger.warning(f"Tables do not match expected table list, expected: {self.table_list}, found: {tables}")
+                    self.logger.warning(f"Attempting to create tables")
+                    self._create_tables()
+
+                    
+        except Exception as e:
+            self.logger.error(f"Error cleaning up temporary tables: {e}")
+            raise
+
+ 
     def fill_reference_tables(self):
+
+        #check if tables exist 
 
         databases_df = pd.DataFrame(self.database_mapping)
         search_types_df = pd.DataFrame(self.search_type_mapping)
@@ -203,26 +321,47 @@ class sql_data_migration:
 
     
     def _prior_id_check(self, df, idcol, table_name):
-        with self.engine.connect() as conn:
-            # Get existing IDs
-            result = conn.execute(text(f"SELECT {idcol} FROM {table_name}"))
-            existing_ids = [row[0] for row in result.fetchall()]
+        temp_table = f"temp_{table_name}_ids"
+        try:
+            temp_df = df.copy()
+            if table_name == 'evidence_reviews': 
+                temp_df[idcol] = temp_df[idcol].astype(str)
+                sql_type = VARCHAR(50)
+            else: 
+                temp_df[idcol] = temp_df[idcol].astype(int)
+                sql_type = Integer
+    
+            with self.engine.begin() as conn:
+                temp_table = f"temp_{table_name}_ids"
+                temp_df[[idcol]].to_sql(temp_table, conn, if_exists='replace', index=False, 
+                                dtype={idcol: sql_type})  #
+                query = f"""
+                    SELECT temp.{idcol} 
+                    FROM {temp_table} temp
+                    WHERE NOT EXISTS (
+                        SELECT 1 
+                        FROM {table_name} existing_table 
+                        WHERE existing_table.{idcol} = temp.{idcol}
+                    )
+                """
+                result = conn.execute(text(query))
+                new_ids = [row[0] for row in result.fetchall()]
+                #drop temporary table 
+                conn.execute(text(f"DROP TABLE IF EXISTS {temp_table} CASCADE"))
             
-            if not existing_ids:  # If table is empty
-                self.logger.info(f"No existing records in {table_name}")
-                return df
-                
-            # Convert IDs to same type as DataFrame for comparison
-            existing_ids = [type(df[idcol].iloc[0])(id) for id in existing_ids]
-            
-            # Filter out existing IDs
-            filtered_df = df[~df[idcol].isin(existing_ids)].copy()
-            
-            self.logger.info(f"Found {len(filtered_df)} new records for {table_name}")
+
+            filtered_df = temp_df[temp_df[idcol].isin(new_ids)].copy()
+            self.logger.info(f"Found {len(filtered_df)} new ids for {table_name}")
+
             return filtered_df
-        
+        except Exception as e:
 
-
+            self.logger.error(f"Error finding new ids for {table_name}: {e}")
+            #still do clean up 
+            with self.engine.connect() as conn:
+                conn.execute(text(f"DROP TABLE IF EXISTS {temp_table} CASCADE"))
+            raise 
+    
     def migrate_search_strategies(self): 
 
         table_name = 'search_strategies'
@@ -255,9 +394,9 @@ class sql_data_migration:
                     self.database_name = 'openalex'
                 search_type_name = file_name[1]
                 if search_type_name == 'topic': 
-                    search_type = 'topic-specific'
+                    self.search_type = 'topic-specific'
                 elif search_type_name == 'overarching': 
-                    search_type = 'overarching'
+                    self.search_type = 'overarching'
                 else: 
                     self.logger.error(f"Error: search type {search_type_name} not found")
                 
@@ -267,28 +406,29 @@ class sql_data_migration:
                 elif search_strategy_type_name == 'topic_search': 
                     search_strategy_type = 'openalex-topic-search'
 
-                if search_type == 'overarching': 
-                    current_id = search_strategy_id_count
-                    searchstrat_year_start_insert.append(1990)
-                    searchstrat_year_end_insert.append(2020)
-                    evidence_review_id_insert.append('overall')
-                    search_strategy_id_insert.append(current_id )
-                    database_insert.append(self.database_name)
-                    search_types_insert.append(search_type)
-                    search_strategy_types_insert.append(search_strategy_type)
-                    search_strategy_id_count += 1
+                if self.search_type == 'overarching': 
                     if file.name == 'oa_overarching_consolidated_topic_search_results.parquet': 
                         self.logger.warning(f"Skipping {file.name} as its too large")
-                    else: 
+                    else:
+                        searchstrat_year_start_insert.append(1990)
+                        searchstrat_year_end_insert.append(2020)
+                        evidence_review_id_insert.append('overall')
+                        search_strategy_id_insert.append(search_strategy_id_count)
+                        database_insert.append(self.database_name)
+                        search_types_insert.append(self.search_type)
+                        search_strategy_types_insert.append(search_strategy_type)
+
                         search_result_df = pd.read_parquet(file)
                         search_results_to_insert.append({
                             'database_name' : self.database_name, 
-                            'search_strategy_id' : current_id, 
-                            'search_result_df' : search_result_df
+                            'search_strategy_id' : search_strategy_id_count, 
+                            'search_result_df' : search_result_df, 
+                            'search_type' : self.search_type
                         })
+                        search_strategy_id_count += 1
                         
 
-                elif search_type == 'topic-specific': 
+                elif self.search_type == 'topic-specific': 
                     _df = pd.read_parquet(file)
                     _df.rename(columns = {
                         'question_id' : 'evidence_review_id'
@@ -322,20 +462,23 @@ class sql_data_migration:
                                             how='left')
                     
                     n_entries = len(evidence_review_id)
-                    search_strategy_id_insert.extend(range(search_strategy_id_count, search_strategy_id_count + n_entries))
+                    search_strat_id_list = list(range(search_strategy_id_count, search_strategy_id_count + n_entries,1))
+                    search_strategy_id_insert.extend(search_strat_id_list)
                     database_insert.extend([self.database_name] * n_entries)
-                    search_types_insert.extend([search_type] * n_entries)
+                    search_types_insert.extend([self.search_type] * n_entries)
                     search_strategy_types_insert.extend([search_strategy_type] * n_entries)
                     searchstrat_year_start_insert.extend(_er_extract['searchstrat_year_start'].tolist())
                     searchstrat_year_end_insert.extend(_er_extract['searchstrat_year_end'].tolist())
-                    evidence_review_id_insert.extend(_er_extract['evidence_review_id'].tolist())
+                    evidence_review_id_list = _er_extract['evidence_review_id'].tolist()
+                    evidence_review_id_insert.extend(evidence_review_id_list)
                     #update search strategy id count 
                     search_strategy_id_count += n_entries
 
                     topic_specific_search_results_to_insert.append({
                         'database_name' : self.database_name, 
-                        'search_strategy_id_list' : search_strategy_id_insert, 
-                        'evidence_review_id_list' : evidence_review_id_insert, 
+                        'search_type' : self.search_type, 
+                        'search_strategy_id_list' : search_strat_id_list, 
+                        'evidence_review_id_list' :evidence_review_id_list, 
                         'file_path' : file
                     })
 
@@ -382,15 +525,24 @@ class sql_data_migration:
             else: 
                 self.logger.info(f"No new search strategies to insert")
 
+        self.logger.info(f"Search strategies inserted into database")  
+        
         return search_results_to_insert, topic_specific_search_results_to_insert
 
-    def _handle_topic_specific_search(self, search_strategy_id_list, evidence_review_id_list, file): 
-
+    def _handle_topic_specific_search(self, search_strategy_id_list, evidence_review_id_list, file_path, database_name, search_type): 
+        self.logger.info(f"Handling topic specific search for {file_path}")
+        self.database_name = database_name
+        self.search_type = search_type
+        df = pd.read_parquet(file_path)
+        df = self._clean_publication_year(df)
+        self.topicsearch_pubyear_clean_flag = True
         for search_strategy_id, evidence_review_id in zip(search_strategy_id_list, evidence_review_id_list):
-            df = pd.read_parquet(file)
-            group_df = df.query(f"question_id == '{evidence_review_id}'")
-            database_name = file.name.split('_')[0]
-            self.migrate_search_result_articles(search_strategy_id, group_df, database_name)
+            if evidence_review_id == 'overall': 
+                group_df = df.copy()
+            else:
+                group_df = df.query(f"question_id == '{evidence_review_id}'").copy()
+            self.logger.info(f'Inserting topic specific results for evidence review id : {evidence_review_id}. Corresponding search strategy id : {search_strategy_id}')
+            self.migrate_search_result_articles(search_strategy_id, group_df, database_name, search_type)
 
     def _grab_latest_search_result_article_id(self): 
                 # Get  current max ID from database if exists
@@ -398,7 +550,7 @@ class sql_data_migration:
             result = conn.execute(text("SELECT COALESCE(MAX(search_result_article_id), 0) FROM search_result_articles"))
             self.current_article_id = result.scalar() + 1
     
-    def migrate_search_result_articles(self, search_strategy_id_count, search_result_article_df, database_name): 
+    def migrate_search_result_articles(self, search_strategy_id_count, search_result_article_df, database_name, search_type): 
         
         table_name = 'search_result_articles'
 
@@ -409,7 +561,7 @@ class sql_data_migration:
             )
         }
         self.database_name = database_name
-
+        self.search_type = search_type
         idcol = db_id_mappings.get(self.database_name)
         if not idcol:
             self.logger.error(f"Unknown database: {self.database_name}")
@@ -430,7 +582,8 @@ class sql_data_migration:
         _extract['search_result_article_id'] = range(self.current_article_id, self.current_article_id + len(_extract), 1)
         
         try:
-            _extract = self._clean_publication_year(_extract)
+            if not self.topicsearch_pubyear_clean_flag: 
+                _extract = self._clean_publication_year(_extract)
         except Exception as e:
             self.logger.error(f"Failed to clean publication years: {e}")
             raise
@@ -440,36 +593,43 @@ class sql_data_migration:
             if not filtered_df.empty: 
                 try: 
                     with self.engine.begin() as conn:
+                        self.logger.info(f"Inserting new search result articles into database, for {self.database_name}, search strategy id : {search_strategy_id_count}, search_type : {self.search_type}")
                         filtered_df.to_sql(table_name, conn, if_exists='append', index=False, method='multi')
                 except Exception as e: 
-                    self.logger.error(f"Error inserting search result articles into database: {e}")
+                    self.logger.error(f"Error inserting search result articles into database")
                     raise e 
             else: 
                 self.logger.info(f"No new search result articles to insert")
 
+
     def _clean_publication_year(self, df: pd.DataFrame) -> pd.DataFrame:
         """Clean and standardize publication year column, handling various edge cases"""
-        df = df.copy()
+        self.logger.info(f"Cleaning publication year for {self.database_name}")
+        df_copy = df.copy()
         
         try:
             # Step 1: Convert to string and clean
-            df['publication_year'] = (df['publication_year']
+            df_copy['publication_year'] = (df_copy['publication_year']
                 .astype(str)
-                .replace(['', 'nan', 'None', '//', 'NaT'], pd.NA)
-                .str.strip()
+                .str.replace('//', '', regex=False)  # Remove //
+                .str.strip('/')     # Remove trailing/leading slashes
+                .str.strip()        # Remove whitespace
+                .str.split(',')     # Split on comma (if multiple years)
+                .str[0]             # Take first value
+                .str.strip()        # Clean up any remaining whitespace
+                .replace(['', 'nan', 'None', 'NaT'], pd.NA)
             )
-            
             # Step 2: Convert to numeric, coercing errors to NaN
-            df['publication_year'] = pd.to_numeric(df['publication_year'], errors='coerce')
+            df_copy['publication_year'] = pd.to_numeric(df_copy['publication_year'], errors='coerce')
             # Step 3: Convert to nullable integer
-            df['publication_year'] = df['publication_year'].astype('Int64')
+            df_copy['publication_year'] = df_copy['publication_year'].astype('Int64')
             
             # Log results
-            total = len(df)
-            valid = df['publication_year'].notna().sum()
+            total = len(df_copy)
+            valid = df_copy['publication_year'].notna().sum()
             self.logger.info(f"Publication year cleaning results - Total: {total}, Valid: {valid}, Missing: {total-valid}")
             
-            return df
+            return df_copy
             
         except Exception as e:
             self.logger.error(f"Error cleaning publication years: {e}")
@@ -478,23 +638,53 @@ class sql_data_migration:
             self.logger.error(f"Sample of problematic values: {problem_values}")
             raise
 
+    def drop_all_tables_data(self): 
+        self.logger.info("Dropping all tables data before migrating all data")
+        try:
+            with self.engine.begin() as conn:  # Use begin() for transaction
+                # Fix: Remove extra quotes and execute statements separately
+                queries = [
+                    "SET session_replication_role = 'replica';",
+                    """
+                    DROP TABLE IF EXISTS 
+                        search_result_articles,
+                        evaluation_results,
+                        search_strategies,
+                        evidence_reviews,
+                        databases,
+                        search_types,
+                        search_strategy_types,
+                        gdgs,
+                        ground_truth_articles
+                    CASCADE;
+                    """,
+                    "SET session_replication_role = 'origin';"
+                ]
+                
+                for query in queries:
+                    conn.execute(text(query))
+                    
+            self.logger.info("Successfully dropped all tables")
+            
+        except Exception as e:
+            self.logger.error(f"Error dropping tables: {e}")
+            raise
 
 if __name__ == '__main__':
+    os.environ['PGHOST'] = '/var/run/postgresql'
     db_name = os.getenv('DB_NAME')
     db_user = os.getenv('DB_USER')
     db_pwd = os.getenv('DB_PWD')
     db_host = os.getenv('DB_HOST')
-    print(db_name, db_user, db_pwd, db_host)
+    db_port = os.getenv('DB_PORT')
     logger = LoggerConfig.setup_logger(logger_name = 'sql_data_migration')
-    sql_instance = sql_data_migration(db_name, db_user, db_pwd, db_host, logger)
-    create_basic_tables(db_name, db_user, db_pwd, db_host)
-    create_database(db_name, db_user, db_pwd, db_host)
+    sql_instance = sql_data_migration(db_name, db_user, db_pwd, db_host, db_port, logger)
     sql_instance.fill_reference_tables()
     sql_instance.migrate_gdg_data()
     sql_instance.migrate_ground_truth_data()
     overarching_search_results_to_insert, topic_specific_search_results_to_insert = sql_instance.migrate_search_strategies()
     for search_results in overarching_search_results_to_insert: 
-        sql_instance.migrate_search_result_articles(search_results['search_strategy_id'], search_results['search_result_df'], search_results['database_name'])
+        sql_instance.migrate_search_result_articles(search_results['search_strategy_id'], search_results['search_result_df'], search_results['database_name'], search_results['search_type'])
     for search_results in topic_specific_search_results_to_insert: 
-        sql_instance._handle_topic_specific_search(search_results['search_strategy_id_list'], search_results['evidence_review_id_list'], search_results['file_path'])
+        sql_instance._handle_topic_specific_search(search_results['search_strategy_id_list'], search_results['evidence_review_id_list'], search_results['file_path'], search_results['database_name'], search_results['search_type'])
     # sql_instance.migrate_search_result_data()
