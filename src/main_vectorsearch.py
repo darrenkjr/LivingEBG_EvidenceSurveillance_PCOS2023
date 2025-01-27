@@ -9,6 +9,15 @@ import platform
 import os
 
 def main(): 
+    ''''
+    Main function running vector search 
+
+    1. Migrate data to postgresql 
+    2. Generate Embeddings for goldset and searchspace 
+    3. Run vector search + RRF 
+    4. Evaluate vector search (basic metrics)
+    
+    '''
     vector_search_cls = vector_search_implementation()
     sql_instance = sql_data_migration()
     # Check both WSL and if PostgreSQL socket exists
