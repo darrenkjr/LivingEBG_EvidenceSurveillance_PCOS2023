@@ -1,0 +1,3 @@
+Question ids corresponding with narrative reviews: ['1.7', '2.6.3', '2.7', '5.7', '5.8', '5.9']
+Question ids corresponding with systematic reviews with included num <= 5: ['1.1', '2.8', '3.2', '5.2', '5.7.2', '5.7.3', '5.7.4', '5.7.6']
+Question ids excluded from ground truth: {'2.7', '3.2', '5.7.6', '5.7.4', '2.6.3', '2.8', '5.9', '1.1', '5.8', '5.7.2', '5.7', '5.7.3', '1.7', '5.2'} due to not meeting inclusion criteria (included num >= 5) and not being systematic reviews

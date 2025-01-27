@@ -17,6 +17,24 @@ class eval_metrics:
     f2_score: float
     f3_score: float
 
+class vectorsearch_eval_metrics: 
+    nnr_raw: int # nnr before cutoff 
+    nnr_first : int #nnr before screening first correct result 
+    nnr_threshold: int # total nnr after applying similiarity threshold
+    n_retrieved: int 
+    n_missed: int
+    recall: float
+    precision: float
+    f1_score: float
+    f2_score: float
+    f3_score: float
+    recall_at_10 : float 
+    recall_at_100: float 
+    recall_at_1000: float
+    similarity_threshold_cutoff: float
+
+
+
 
 class search_evaluation: 
 
@@ -242,7 +260,7 @@ class search_evaluation:
         results_df[self.result_id_col] = results_df[self.result_id_col].str.lower()
         if self.database == 'oa': 
             #remove leading 'https://openalex.org/' from result_id_col
-            results_df[self.result_id_col] = results_df[self.result_id_col].str.replace('https://openalex.org/', '')
+            results_df[self.result_id_col] = results_df[self.result_id_col].str.replace('https://openalex.org/', '').str.lower()
 
         evalmetrics_df = pd.DataFrame()
         self.logger.info(f'Evaluating matches for {self.database} {self.search_type} {self.strategy_type} {self.vector_search_flag}')
@@ -370,6 +388,85 @@ class search_evaluation:
 
         return eval_metrics(nnr, n_retrieved, n_missed, recall, precision, f1, f2, f3)
     
+    def _evaluate_vs_matches(self, evaluation_df : pd.DataFrame, rrf_sim_result_df : pd.DataFrame, database_name : str) -> pd.DataFrame: 
+
+        if database_name == 'openalex': 
+            #clean up leading https://openalex.org/
+            rrf_sim_result_df['original_id'] = rrf_sim_result_df['original_id'].str.replace('https://openalex.org/', '').str.lower()
+
+        eval_id_dct = {
+            'pubmed' : 'retrieved_pubmed_id',
+            'medline' : 'retrieved_pubmed_id', 
+            'embase' : 'retrieved_embase_id', 
+            'openalex' : 'retrieved_oa_id'
+        }
+        eval_id_col = eval_id_dct[database_name]
+
+
+        matches = evaluation_df.merge(
+        rrf_sim_result_df,
+        left_on=eval_id_col,
+        right_on='original_id',
+        how='inner'
+    )
+        return matches
+
+    
+    def calc_vectorsearch_metrics(self, comparison_df: pd.DataFrame, raw_results_df: pd.DataFrame, query_goldset_df: pd.DataFrame) -> vectorsearch_eval_metrics:
+        '''
+        Calculates vector search metrics for a given evaluation set (dependent on evidence_review_id further upstream) raw results set, 
+        and query_goldset_df (also dependent on evidence_review_id further upstream)
+
+        Args: 
+            comparison_df: dataframe with evaluation set
+            raw_results_df: dataframe with raw results set
+            query_goldset_df: dataframe with query goldset
+
+        Returns: 
+            vectorsearch_eval_metrics: dataclass with vector search metrics
+        '''
+
+        #dedupe results df, and make sure that it is sorted by ranking 
+        raw_results_df_dedupe = raw_results_df.drop_duplicates(subset = 'original_id').sort_values('rank').copy()
+        #evaluate matches 
+        matches = self._evaluate_vs_matches(comparison_df, raw_results_df_dedupe, self.database)
+        #non ranked metrics 
+        nnr_raw = len(raw_results_df_dedupe) # total number of results to read before looking at ranking 
+        n_retrieved = len(matches) #total number of sucessful matches / results retrived 
+        n_missed = len(comparison_df) - len(matches) #total number of missed results 
+        recall = len(matches) / len(comparison_df) #recall of the search (raw)
+        precision = len(matches) / len(raw_results_df_dedupe) #precision of the search (raw)=
+        f1 = self._calc_fscore(precision, recall, 1)
+        f2 = self._calc_fscore(precision, recall, 2)
+        f3 = self._calc_fscore(precision, recall, 3)
+
+        matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_goldset_df['ground_truth_article_id'])]
+        #ranked metrics 
+        if len(matches) > 0: 
+            matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_goldset_df['ground_truth_article_id'])]
+            #find first match that isn't in the goldset (ie: a theoretically new match)
+            nnr_first = matches_filter_goldset['rank'].min()
+            similarity_threshold_cutoff = matches_filter_goldset['normalized_cosine_sim'].min()
+            result_cutoff_df = raw_results_df_dedupe.query(f'normalized_cosine_sim >= {similarity_threshold_cutoff}')
+            nnr_threshold = len(result_cutoff_df)
+        
+            recall_at_k_dct = {}
+            for k in [10, 100, 1000]: 
+                top_k_ids = raw_results_df_dedupe.head(k)['original_id']
+                # Count matches in top k (including duplicates)
+                matches_at_k = matches[matches['original_id'].isin(top_k_ids)].shape[0]
+                recall_at_k = matches_at_k / len(comparison_df)
+                self.logger.info(f'Recall at {k}: {recall_at_k}')
+                recall_at_k_dct[f'recall_at_{k}'] = recall_at_k
+
+        #check recall for the trimmed results 
+        matched_cutoff = self._evaluate_vs_matches(comparison_df, result_cutoff_df, self.database)
+        recall_cutoff = len(matched_cutoff) / len(comparison_df)
+        assert recall_cutoff == recall 
+        recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
+
+        return vectorsearch_eval_metrics(nnr_raw, nnr_first, nnr_threshold, n_retrieved, n_missed, recall, precision, f1, f2, f3, recall_at_10, recall_at_100, recall_at_1000, similarity_threshold_cutoff), result_cutoff_df
+    
     
     def _calc_fscore(self, precision: float, recall: float, beta: float = 1) -> float: 
         try: 
@@ -408,10 +505,31 @@ class search_evaluation:
         missed_results_df.to_csv(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
         #matched results to csv 
         match_results_df.to_csv(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
+    
+    
     def run_eval_pipeline(self): 
-        if self.search_type == 'overarching': 
-            result_df = self._load_overarching_search_results()
-        elif self.search_type == 'topic_specific': 
-            result_df = self._load_topic_specific_search_results()
-        
-        return self.process_search_results(result_df)
+
+        if self.vector_search_flag == False: 
+
+            if self.search_type == 'overarching': 
+                result_df = self._load_overarching_search_results()
+            elif self.search_type == 'topic_specific': 
+                result_df = self._load_topic_specific_search_results()
+            
+            return self.process_search_results(result_df)
+
+    def run_vectorsearch_eval_pipeline(self, result_set: pd.DataFrame, evaluation_set: pd.DataFrame, query_goldset_df: pd.DataFrame): 
+
+        if self.vector_search_flag == True: 
+            
+            vector_search_metrics, result_cutoff_df = self.calc_vectorsearch_metrics(comparison_df = evaluation_set, raw_results_df = result_set, query_goldset_df = query_goldset_df)
+            vector_search_metrics_df = pd.DataFrame.from_records([asdict(vector_search_metrics)])
+            #add metadata 
+            vector_search_metrics_df['database'] = self.database
+            vector_search_metrics_df['search_type'] = self.search_type
+            vector_search_metrics_df['search_strategy'] = self.strategy_type
+            vector_search_metrics_df['vector_search'] = self.vector_search_flag
+            vector_search_metrics_df['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+            return vector_search_metrics_df, result_cutoff_df
+
+

@@ -98,6 +98,11 @@ class ConvenienceFunc:
         #read in PCOS dataset, and extract valid rqs 
         self.original_df = pd.read_excel(rq_dataset_path, sheet_name='rq_evidence_review', engine='openpyxl', dtype={'question_id': str})
         pcosrq_valid_df = self.original_df.query('evidence_review_type == "SR" and included_num >= 5').copy()[['GDG', 'question_id', 'Topic', 'Question', 'sr_update', 'included_num', 'searchstrat_year_start', 'searchstrat_year_end']]
+        #question_ids removed 
+        excluded_question_ids = set(self.original_df['question_id'].unique().tolist()) - set(pcosrq_valid_df['question_id'].unique().tolist())
+        print(f"Question ids corresponding with narrative reviews: { self.original_df.query('evidence_review_type != "SR"')['question_id'].unique().tolist()}")
+        print(f"Question ids corresponding with systematic reviews with included num <= 5: { self.original_df.query('evidence_review_type == "SR" and included_num < 5')['question_id'].unique().tolist()}")
+        print(f"Question ids excluded from ground truth: {excluded_question_ids} due to not meeting inclusion criteria (included num >= 5) and not being systematic reviews")
 
         #extract full ground truth dataset 
         fullgroundtruth_full_df = pd.read_excel(rq_dataset_path, sheet_name='included_articles', engine='openpyxl', dtype={'question_id': str, 'included_article_id': str, 'retrieved_oa_id': str, 'retrieved_embase_id': str, 'retrieved_pubmed_id': str}).copy()
@@ -196,7 +201,7 @@ class ConvenienceFunc:
         
         fullgroundtruth_valid_apimerge_df['title'] = fullgroundtruth_valid_apimerge_df['title'].apply(lambda x: self.clean_html_tags(x) if pd.notna(x) else x)
         fullgroundtruth_valid_apimerge_df['abstract'] = fullgroundtruth_valid_apimerge_df['abstract'].apply(lambda x: self.clean_html_tags(x) if pd.notna(x) else x)
-
+        fullgroundtruth_valid_apimerge_df.reset_index(inplace = True)
         #save for later use (evaluation)
         fullgroundtruth_valid_apimerge_df.to_excel(output_dir / 'fullgroundtruth_valid_apimerge_df.xlsx', index=False)
         #also save as parquet to preserve data types 

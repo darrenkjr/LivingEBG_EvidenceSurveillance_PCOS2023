@@ -24,9 +24,6 @@ class sql_data_migration:
         self.db_host = db_host
         self.db_port = db_port
 
-
-
-        
         self.engine  = self._create_database() 
         
         self.logger.info(f"Connecting to database {self.db_name}")
@@ -227,7 +224,7 @@ class sql_data_migration:
 
         #retrieve table column from sql and check columns 
         if self._df_sqltable_column_check(gdg_extract, 'gdgs'): 
-            filered_df = self._prior_id_check(gdg_extract, 'gdg_id', 'gdgs') 
+            filered_df = self._prior_id_check(gdg_extract, 'gdg_id', 'gdgs', engine = self.engine, logger = self.logger) 
             with self.engine.begin() as conn:
                 filered_df.to_sql('gdgs', conn, if_exists='append', index=False)
 
@@ -262,7 +259,7 @@ class sql_data_migration:
         self.er_extract = evidence_review_extract.copy()
         evidence_review_extract.drop(columns = ['searchstrat_year_start', 'searchstrat_year_end'], inplace=True)
         if self._df_sqltable_column_check(evidence_review_extract, 'evidence_reviews'): 
-            evidence_review_extract_filtered = self._prior_id_check(evidence_review_extract, 'evidence_review_id', 'evidence_reviews')
+            evidence_review_extract_filtered = self._prior_id_check(evidence_review_extract, 'evidence_review_id', 'evidence_reviews', engine = self.engine, logger = self.logger)
             if not evidence_review_extract_filtered.empty: 
                 with self.engine.begin() as conn:
                     self.logger.info(f"Inserting new evidence reviews into database, number of entries detected: {len(evidence_review_extract_filtered)}")
@@ -285,7 +282,7 @@ class sql_data_migration:
             }, inplace=True)
         
         if self._df_sqltable_column_check(ground_truth_df, 'ground_truth_articles'): 
-            filtered_ground_truth_df = self._prior_id_check(ground_truth_df, 'ground_truth_article_id', 'ground_truth_articles') 
+            filtered_ground_truth_df = self._prior_id_check(ground_truth_df, 'ground_truth_article_id', 'ground_truth_articles', engine = self.engine, logger = self.logger) 
             if not filtered_ground_truth_df.empty: 
                 with self.engine.begin() as conn:
                     self.logger.info(f"Inserting new ground truth articles into database, number of entries detected: {len(filtered_ground_truth_df)}")
@@ -319,8 +316,8 @@ class sql_data_migration:
             return False
     
 
-    
-    def _prior_id_check(self, df, idcol, table_name):
+    @staticmethod
+    def _prior_id_check(df, idcol, table_name, engine = None, logger = None):
         temp_table = f"temp_{table_name}_ids"
         try:
             temp_df = df.copy()
@@ -331,7 +328,7 @@ class sql_data_migration:
                 temp_df[idcol] = temp_df[idcol].astype(int)
                 sql_type = Integer
     
-            with self.engine.begin() as conn:
+            with engine.begin() as conn:
                 temp_table = f"temp_{table_name}_ids"
                 temp_df[[idcol]].to_sql(temp_table, conn, if_exists='replace', index=False, 
                                 dtype={idcol: sql_type})  #
@@ -351,14 +348,14 @@ class sql_data_migration:
             
 
             filtered_df = temp_df[temp_df[idcol].isin(new_ids)].copy()
-            self.logger.info(f"Found {len(filtered_df)} new ids for {table_name}")
+            logger.info(f"Found {len(filtered_df)} new ids for {table_name}")
 
             return filtered_df
         except Exception as e:
 
-            self.logger.error(f"Error finding new ids for {table_name}: {e}")
+            logger.error(f"Error finding new ids for {table_name}: {e}")
             #still do clean up 
-            with self.engine.connect() as conn:
+            with engine.connect() as conn:
                 conn.execute(text(f"DROP TABLE IF EXISTS {temp_table} CASCADE"))
             raise 
     
@@ -517,7 +514,7 @@ class sql_data_migration:
 
         #check columns 
         if self._df_sqltable_column_check(search_strategies_df, table_name): 
-            filtered_search_strategies_df = self._prior_id_check(search_strategies_df, 'search_strategy_id', table_name)
+            filtered_search_strategies_df = self._prior_id_check(search_strategies_df, 'search_strategy_id', table_name, engine = self.engine, logger = self.logger)
             if not filtered_search_strategies_df.empty: 
                 with self.engine.begin() as conn:
                     self.logger.info(f"Inserting new search strategies into database, number of entries detected: {len(filtered_search_strategies_df)}")
@@ -589,7 +586,7 @@ class sql_data_migration:
             raise
 
         if self._df_sqltable_column_check(_extract, table_name): 
-            filtered_df = self._prior_id_check(_extract, 'search_result_article_id', table_name)
+            filtered_df = self._prior_id_check(_extract, 'search_result_article_id', table_name, engine = self.engine, logger = self.logger)
             if not filtered_df.empty: 
                 try: 
                     with self.engine.begin() as conn:
