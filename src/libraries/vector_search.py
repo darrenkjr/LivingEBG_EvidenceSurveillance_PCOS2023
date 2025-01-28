@@ -162,17 +162,20 @@ class vector_search_implementation():
         Then - generate searchspace embeddings for each database (if not already done)
         Then loop through serach strategy articles with search_type = 1, join with searchspace embeddings
         '''
+        self.logger.info(f'Retrieving overarching search strats')
+        overarching_searchstrat_df = self.sql_procedures.retrieve_searchstrat(search_type = 'overarching')
 
-        overarching_searchstrat_df = self.sql_procedures.retrieve_searchstrat(search_type = 'ovearching')
-        #create new search strats - which is a copy of the overarching search start, but with a vector search flag 
-        overarching_searchstrat_df['search_type_id'] = 3
-        overarching_searchstrat_df['vector_search'] = True
-        overarching_searchstrat_df['original_search_strategy_id'] = overarching_searchstrat_df['search_strategy_id']
-        input_searchstrat_df = self.sql_procedures.create_new_searchstrat_vectorsearch(overarching_searchstrat_df)
+        #create new search strats - which is a copy of the overarching search start, but with a vector search flag
+        temp_df = overarching_searchstrat_df.copy()
+        temp_df['vector_search'] = True
+        temp_df['search_strategy_type_id'] = 3
+        temp_df['original_search_strategy_id'] = temp_df['search_strategy_id']
+        self.logger.info(f'Creating new search strats with vector search flag for overarching search strats')
+        input_searchstrat_df = self.sql_procedures.create_new_searchstrat_vectorsearch(temp_df)
         eval_metrics_df_list = []
         result_cutoff_df_list = []
 
-        for original_searchstrat_id, searchstrat_id, evidence_review_id in zip(input_searchstrat_df['original_search_strategy_id'], input_searchstrat_df['evidence_review_id'], input_searchstrat_df['search_strategy_id'],): 
+        for original_searchstrat_id, searchstrat_id, evidence_review_id in zip(input_searchstrat_df['original_search_strategy_id'], input_searchstrat_df['search_strategy_id'], input_searchstrat_df['evidence_review_id'],): 
             self.sql_procedures.run_vector_search(original_searchstrat_id = original_searchstrat_id, searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id)
             #ranked results output 
             rrf_sim_result_df = self.sql_procedures.rrf_combine_results(searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id)

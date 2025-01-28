@@ -19,22 +19,28 @@ class sql_procedures:
             conn.execute(text('CREATE EXTENSION IF NOT EXISTS vector'))
 
 
-    def retrieve_searchstrat(self,search_type): 
+    def retrieve_searchstrat(self, search_type): 
 
         '''
         Provides a datafram of search strategies that are overarching. First join search strat table to the reference tables (database, and search strategy, and search type)
         Then filter for overarching search strategies 
         '''
+        if search_type == 'overarching': 
+            distinct_on_clause = ''
+        elif search_type == 'topic-specific': 
+            distinct_on_clause = 'DISTINCT ON (ss.evidence_review_id)'
+        else: 
+            raise ValueError(f'Invalid search type: {search_type}')
 
         query = f"""
             WITH overarching_search_strat AS (
-                SELECT DISTINCT ON (ss.evidence_review_id)
+                SELECT {distinct_on_clause}
                     ss.search_strategy_id, 
                     ss.evidence_review_id, 
                     ss.database_id, 
                     ss.searchstrat_year_start, 
                     ss.search_type_id, 
-                    d.name as database_name, 
+                    d.database_name as database_name, 
                     st.name as search_type_name, 
                     ss_type.name as search_strategy_type_name
                 FROM search_strategies ss 
@@ -48,7 +54,10 @@ class sql_procedures:
                     ss.search_strategy_id,
                     ss.search_type_id,
                     ss.database_id
-            )"""
+                    )
+
+            SELECT * FROM overarching_search_strat
+            """
 
         with self.engine.connect() as conn: 
             overarching_searchstrat_df = pd.read_sql(query, conn)
@@ -352,47 +361,18 @@ class sql_procedures:
         Returns: 
             None, but creates a new search strategy entry in the databse 
         '''
-        #add a vector search flag to the search strategy table 
-        add_vs_flag_col = f"""
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (
-                    SELECT 1 
-                    FROM information_schema.columns 
-                    WHERE table_name='search_strategies' 
-                    AND column_name='vector_search'
-                ) THEN 
-                    ALTER TABLE search_strategies 
-                    ADD COLUMN vector_search BOOLEAN DEFAULT FALSE;
-                END IF;
-            END $$;
-        """
-
-        add_new_searchtype_query = """
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (
-                    SELECT 1 FROM search_types 
-                    WHERE name = 'boolean-kw_vectorsearch'
-                ) THEN 
-                    INSERT INTO search_types (search_type_id, name) 
-                    VALUES (3, 'boolean-kw_vectorsearch');
-                END IF;
-            END $$;
-        """
 
         #insert new search stragies into the table 
         with self.engine.begin() as conn: 
-            latest_search_strat_id = conn.execute(text("SELECT MAX(search_strategy_id) FROM search_strategies")).scalar()
-        input_df['search_strategy_id'] = input_df.index + latest_search_strat_id + 1
-
-
-        with self.engine.begin() as conn: 
-            conn.execute(text(add_vs_flag_col))
-            conn.execute(text(add_new_searchtype_query))
-            #check for existing ids 
+            latest_search_strat_id = conn.execute(text("SELECT COALESCE(MAX(search_strategy_id), 0) FROM search_strategies")).scalar()
+            # Use range instead of index
+            input_df['search_strategy_id'] = range(latest_search_strat_id + 1, latest_search_strat_id + 1 + len(input_df),1)
             filtered_input_df = sql_data_migration._prior_id_check(input_df, 'search_strategy_id', 'search_strategies', engine = self.engine, logger = self.logger)
-            filtered_input_df.to_sql('search_strategies', conn, if_exists = 'append', index = False)
+
+            if not filtered_input_df.empty: 
+                #drop not essential columns 
+                _input_df = filtered_input_df.drop(columns = ['database_name', 'search_strategy_type_name', 'original_search_strategy_id', 'search_type_name'])
+            _input_df.to_sql('search_strategies', conn, if_exists = 'append', index = False)
 
         return filtered_input_df
 
@@ -433,7 +413,7 @@ class sql_procedures:
         CREATE MATERIALIZED VIEW IF NOT EXISTS "vector_search_results_{searchstrat_id}_{evidence_review_id}" AS 
         WITH query_vectors AS (
             SELECT ground_truth_article_id, embedding 
-            FROM goldset_embeddings {goldset_query_filter}
+            FROM query_goldset_embeddings {goldset_query_filter}
         ),
 
         search_result_articles_emb AS (
@@ -494,7 +474,6 @@ class sql_procedures:
 
                 self.logger.info(f'Running vector search for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
                 conn.execute(text(vector_search_query))
-
                 self.logger.info(f'Vector search completed for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
 
         except Exception as e: 

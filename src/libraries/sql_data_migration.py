@@ -34,7 +34,7 @@ class sql_data_migration:
                 self.logger.info(f"Connection successful")
             except Exception as e:
                 self.logger.error(f"Error connecting to database: {e}")
-        self.drop_all_tables_data()
+    
 
         self.gdg_data_path = Path(__file__).parent.parent / 'dataset' / '_superseded' / 'PCOS_Guideline_Dataset_checked.xlsm'
         self.ground_truth_data_path = Path(__file__).parent.parent / 'dataset' / 'fullgroundtruth_valid_apimerge_df.parquet'
@@ -51,8 +51,8 @@ class sql_data_migration:
         }
 
         self.search_strategy_type_mapping = {
-            'search_strategy_type_id' : [1, 2], 
-            'name' : ['boolean-kw', 'openalex-topic-search']
+            'search_strategy_type_id' : [1, 2, 3], 
+            'name' : ['boolean-kw', 'openalex-topic-search', 'boolean-kw-vectorsearch']
         }
 
         self.database_id_mapping = {
@@ -65,9 +65,19 @@ class sql_data_migration:
         self.current_article_id  = 1
         self.topicsearch_pubyear_clean_flag = False
         self.table_list = ['gdgs', 'databases', 'search_types', 'search_strategy_types', 'evidence_reviews', 'ground_truth_articles', 'search_strategies','search_result_articles', 'evaluation_results']
-        self._check_tables()
 
-        
+        #expected table length after initialisation and migration
+        self.expected_table_length = {
+            'gdgs' : 6, 
+            'databases' : 4, 
+            'search_types' : 2, 
+            'searchstrategy_types' : 3, 
+            'evidence_reviews' : 55, 
+            'ground_truth_articles' : 1246, 
+            'search_strategies' : 82, 
+            'search_result_articles' : 294611, 
+            'evaluation_results' : 0
+        }
 
     def _create_database(self):
         """Create database if it doesn't exist using pure SQLAlchemy"""
@@ -145,41 +155,7 @@ class sql_data_migration:
             raise
                 
 
-    def _check_tables(self):
-        try:
-            with self.engine.begin() as conn:
-                # Get list of temporary tables (only do this once)
-                result = conn.execute(text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public' AND table_name LIKE 'temp_%'"
-                ))
-                temp_tables = [row[0] for row in result]
-                
-                if temp_tables:
-                    self.logger.info(f"Found temporary tables: {temp_tables}")
-                    # Drop all temporary tables in a single transaction
-                    for table_name in temp_tables:
-                        conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
-                    self.logger.info(f"Successfully dropped {len(temp_tables)} temporary tables")
-                else:
-                    self.logger.info("No temporary tables found")
-
-
-                #check tables again 
-                result = conn.execute(text(
-                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
-                )) 
-
-                tables = [row[0] for row in result]
-                if set(tables) != set(self.table_list): 
-                    self.logger.warning(f"Tables do not match expected table list, expected: {self.table_list}, found: {tables}")
-                    self.logger.warning(f"Attempting to create tables")
-                    self._create_tables()
-
-                    
-        except Exception as e:
-            self.logger.error(f"Error cleaning up temporary tables: {e}")
-            raise
+ 
 
  
     def fill_reference_tables(self):
@@ -511,6 +487,7 @@ class sql_data_migration:
         })
 
         search_strategies_df['searchdetail_file_path'] = 'placeholder'
+        search_strategies_df['vector_search'] = False
 
         #check columns 
         if self._df_sqltable_column_check(search_strategies_df, table_name): 
@@ -666,6 +643,75 @@ class sql_data_migration:
         except Exception as e:
             self.logger.error(f"Error dropping tables: {e}")
             raise
+
+    def check_data_migration(self):
+        
+        if self._check_tables() and self._check_table_length(): 
+            self.logger.info(f"All tables exist and have the correct length")
+            return True
+        else: 
+            self.logger.error(f"Error: Tables do not exist or have incorrect length")
+            return False
+
+    def _check_tables(self):
+        try:
+            with self.engine.begin() as conn:
+                # Get list of temporary tables (only do this once)
+                result = conn.execute(text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_name LIKE 'temp_%'"
+                ))
+                temp_tables = [row[0] for row in result]
+                
+                if temp_tables:
+                    self.logger.info(f"Found temporary tables: {temp_tables}")
+                    # Drop all temporary tables in a single transaction
+                    for table_name in temp_tables:
+                        conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
+                    self.logger.info(f"Successfully dropped {len(temp_tables)} temporary tables")
+                else:
+                    self.logger.info("No temporary tables found")
+
+
+                #check tables again 
+                result = conn.execute(text(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+                )) 
+
+                tables = [row[0] for row in result]
+                if not set(self.table_list).issubset(set(tables)): 
+                    self.logger.warning(f"Tables do not match expected table list, expected: {self.table_list}, found: {tables}")
+                    return False
+                else: 
+                    self.logger.info(f"All appropriate tables exist")
+                    return True
+
+                    
+        except Exception as e:
+            self.logger.error(f"Error cleaning up temporary tables: {e}")
+            raise
+    
+    def _check_table_length(self): 
+        self.logger.info(f"Checking table length")
+
+
+        for table_name in self.table_list: 
+            with self.engine.connect() as conn: 
+                result = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
+                table_length = result.scalar()
+                self.logger.info(f"Table {table_name} length: {table_length}")
+                
+                try: 
+                    assert table_length >= self.expected_table_length[table_name], f"Table {table_name} length does not match at least the expected length, expected: {self.expected_table_length[table_name]}, found: {table_length}"
+                except AssertionError as e: 
+                    self.logger.error(f"Error: Table {table_name} length does not match expected length, expected: {self.expected_table_length[table_name]}, found: {table_length}")
+                    return False
+                
+        return True
+
+
+    
+    
 
 if __name__ == '__main__':
     os.environ['PGHOST'] = '/var/run/postgresql'

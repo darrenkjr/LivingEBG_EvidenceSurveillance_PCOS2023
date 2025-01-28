@@ -31,33 +31,37 @@ def main():
         os.environ['PGHOST'] = '/var/run/postgresql' 
     else: 
         os.environ['PGHOST'] = 'localhost' 
+
     db_name = os.getenv('DB_NAME')
     db_user = os.getenv('DB_USER')
     db_pwd = os.getenv('DB_PWD')
     db_host = os.getenv('DB_HOST')
     db_port = os.getenv('DB_PORT')
 
-    logger.info(f'Migrating data to postgresql')
-    sql_instance = sql_data_migration(db_name, db_user, db_pwd, db_host, db_port, logger)
-    
-    logger.info(f'Filling reference tables')
-    sql_instance.fill_reference_tables()
-    
-    logger.info(f'Migrating goldset data')
-    sql_instance.migrate_gdg_data()
-    
-    logger.info(f'Migrating ground truth data')
-    sql_instance.migrate_ground_truth_data()
-    
-    logger.info(f'Migrating search strategies')
-    
-    overarching_search_results_to_insert, topic_specific_search_results_to_insert = sql_instance.migrate_search_strategies()
-    
-    for search_results in overarching_search_results_to_insert: 
-        sql_instance.migrate_search_result_articles(search_results['search_strategy_id'], search_results['search_result_df'], search_results['database_name'], search_results['search_type'])
-    for search_results in topic_specific_search_results_to_insert: 
-        sql_instance._handle_topic_specific_search(search_results['search_strategy_id_list'], search_results['evidence_review_id_list'], search_results['file_path'], search_results['database_name'], search_results['search_type'])
+    #perform data migration checks 
 
+
+    logger.info(f'Performing data migration checks')
+    sql_instance = sql_data_migration(db_name, db_user, db_pwd, db_host, db_port, logger)
+    if not sql_instance.check_data_migration(): 
+        logger.info(f'Data migration checks failed, regenerating all tables')
+        sql_instance.drop_all_tables_data()
+        logger.info(f'Creating all tables')
+        sql_instance._create_tables()
+        logger.info(f'Filling reference tables')
+        sql_instance.fill_reference_tables()
+        logger.info(f'Migrating goldset data')
+        sql_instance.migrate_gdg_data()
+        logger.info(f'Migrating ground truth data')
+        sql_instance.migrate_ground_truth_data()
+        logger.info(f'Migrating search strategies')
+        overarching_search_results_to_insert, topic_specific_search_results_to_insert = sql_instance.migrate_search_strategies()
+        for search_results in overarching_search_results_to_insert: 
+            sql_instance.migrate_search_result_articles(search_results['search_strategy_id'], search_results['search_result_df'], search_results['database_name'], search_results['search_type'])
+        for search_results in topic_specific_search_results_to_insert: 
+            sql_instance._handle_topic_specific_search(search_results['search_strategy_id_list'], search_results['evidence_review_id_list'], search_results['file_path'], search_results['database_name'], search_results['search_type'])
+    elif sql_instance.check_data_migration(): 
+        logger.info(f'Data migration checks passed, skipping data migration')
     logger.info('Initializing vector search')
     vector_search_cls = vector_search_implementation(logger = logger)
     for search_type in ['overarching', 'topic-specific']: 

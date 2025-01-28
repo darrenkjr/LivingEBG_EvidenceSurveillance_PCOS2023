@@ -54,6 +54,7 @@ CREATE TABLE search_strategies (
     searchstrat_year_end INT, 
     searchdetail_file_path TEXT, 
     search_type_id INT REFERENCES search_types(search_type_id), 
+    vector_search BOOLEAN DEFAULT FALSE, 
     search_strategy_type_id INT REFERENCES search_strategy_types(search_strategy_type_id)
     );
 
