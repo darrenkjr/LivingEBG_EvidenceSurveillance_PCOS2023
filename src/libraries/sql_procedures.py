@@ -3,10 +3,10 @@ from sqlalchemy import text
 from dotenv import load_dotenv
 import pandas as pd 
 from pathlib import Path
-from logging_config import LoggerConfig
+from libraries.logging_config import LoggerConfig
 import os 
 from pgvector.sqlalchemy import Vector
-from sql_data_migration import sql_data_migration
+from libraries.sql_data_migration import sql_data_migration
 
 class sql_procedures: 
 
@@ -70,10 +70,10 @@ class sql_procedures:
         
     def retrieve_search_result_articles_databaseview(self, database_id): 
         '''
-        Returns search result articles for a given database id. First join search result articles to search strategies, then filter for database id 
+        Returns unique search result articles for a given database id. First join search result articles to search strategies, then filter for database id 
         '''
         query = f"""
-            SELECT DISTINCT on (sr.original_id)
+            SELECT
                 sr.search_result_article_id, 
                 sr.title, 
                 sr.abstract, 
@@ -270,6 +270,7 @@ class sql_procedures:
                     conn.execute(text(query))
                 
                 self.logger.info(f'Embeddings table {embedding_table_name} created')
+
         except Exception as e: 
             self.logger.error(f'Error creating embeddings table {embedding_table_name}: {e}')
             raise e 
@@ -299,7 +300,7 @@ class sql_procedures:
                 INSERT INTO {embedding_table_name} ({linking_id}, embeddings) 
                 VALUES (:{linking_id}, :embeddings)
                 ON CONFLICT ({linking_id}) 
-                DO UPDATE SET embeddings` = EXCLUDED.embeddings;
+                DO UPDATE SET embeddings = EXCLUDED.embeddings;
             """
             
             # Use simple insert
@@ -309,7 +310,7 @@ class sql_procedures:
                     data
                 )
                 self.logger.info(f'Embeddings added to {embedding_table_name}')
-                
+
         except Exception as e:
             self.logger.error(f'Error adding embeddings to {embedding_table_name}: {e}')
             raise e
@@ -408,7 +409,7 @@ class sql_procedures:
                 eg: overall = all goldset articles are query vectors, else, goldset articles associated with evidence review id are query vectors 
 
         Returns: 
-            view of search results, with cosine similiarity socres (both raw and normalized + ranking using normalized scores)
+            view of search results, with cosine similiarity socres and corresponding rank
         '''
 
         self.logger.info(f'Cleaning up previous vector search results if applicable')
@@ -445,22 +446,22 @@ class sql_procedures:
                     WHEN ss.database_id = 1 THEN (
                         SELECT embedding 
                         FROM searchspace_database_pubmed_embeddings 
-                        WHERE original_id = sra.original_id
+                        WHERE search_result_article_id = sra.search_result_article_id
                     )
                     WHEN ss.database_id = 2 THEN (
                         SELECT embedding 
                         FROM searchspace_database_medline_embeddings 
-                        WHERE original_id = sra.original_id
+                        WHERE search_result_article_id = sra.search_result_article_id
                     )
                     WHEN ss.database_id = 3 THEN (
                         SELECT embedding 
                         FROM searchspace_database_embase_embeddings 
-                        WHERE original_id = sra.original_id
+                        WHERE search_result_article_id = sra.search_result_article_id
                     )
                     WHEN ss.database_id = 4 THEN (
                         SELECT embedding 
                         FROM searchspace_database_openalex_embeddings 
-                        WHERE original_id = sra.original_id
+                        WHERE search_result_article_id = sra.search_result_article_id
                     )
                 END as embedding 
             FROM search_result_articles sra 
@@ -468,39 +469,21 @@ class sql_procedures:
             WHERE ss.search_strategy_id = {original_searchstrat_id}
         ),
 
-        raw_cosine_sim AS (
+        raw_cosine_sim_ranked AS (
             SELECT 
                 query_vectors.ground_truth_article_id, 
                 search_result_articles_emb.search_result_article_id, 
                 search_result_articles_emb.search_strategy_id, 
-                1 - (query_vectors.embedding <=> search_result_articles_emb.embedding) AS cosine_similarity
+                1 - (query_vectors.embedding <=> search_result_articles_emb.embedding) AS cosine_similarity,
+                ROW_NUMBER() OVER (
+                PARTITION BY ground_truth_article_id 
+                ORDER BY cosine_similarity DESC) as rank
             FROM query_vectors 
             CROSS JOIN search_result_articles_emb  
             WHERE search_result_articles_emb.embedding IS NOT NULL
-            ), 
+            )
 
-        normalized_cosine_sim AS (
-            SELECT 
-                *, 
-                (cosine_similarity - MIN(cosine_similarity) OVER (PARTITION BY ground_truth_article_id)) /
-                NULLIF ((MAX(cosine_similarity) OVER (PARTITION BY ground_truth_article_id) - MIN(cosine_similarity) 
-                OVER (PARTITION BY ground_truth_article_id)), 0) as normalized_similarity
-            FROM raw_cosine_sim   
-        ),
-
-        cosine_sim_ranked AS (
-            SELECT 
-                ground_truth_article_id,
-                search_result_article_id, 
-                search_strategy_id, 
-                cosine_similarity as raw_cosine_sim, 
-                normalized_similarity as normalized_cosine_sim,
-                ROW_NUMBER() OVER (PARTITION BY ground_truth_article_id ORDER BY normalized_similarity DESC) as rank
-            FROM normalized_cosine_sim
-            ORDER BY ground_truth_article_id, rank DESC
-        )
-
-        SELECT * FROM cosine_sim_ranked;
+        SELECT * FROM raw_cosine_sim_ranked;
 
         """
         try:
@@ -534,7 +517,6 @@ class sql_procedures:
         rrf_sim_df = sim_df.groupby('search_result_article_id').agg({
             'rrf_score': 'sum',
             'raw_cosine_sim': 'mean',
-            'normalized_cosine_sim': 'mean',
             'search_strategy_id': 'first'
             }).reset_index().copy()
 

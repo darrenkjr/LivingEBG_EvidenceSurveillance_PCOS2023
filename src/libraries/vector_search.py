@@ -4,13 +4,16 @@ import numpy as np
 import pandas as pd 
 import torch 
 from pathlib import Path
+from tqdm.auto import tqdm
+
 from sqlalchemy import create_engine
 from sqlalchemy import text
 from dotenv import load_dotenv
 import os 
-from logging_config import LoggerConfig
-from sql_procedures import sql_procedures
-from eval import search_evaluation
+#add libraries to path 
+from libraries.logging_config import LoggerConfig
+from libraries.sql_procedures import sql_procedures
+from libraries.eval import search_evaluation
 load_dotenv()
 
 class vector_search_implementation(): 
@@ -95,33 +98,62 @@ class vector_search_implementation():
         
     def generate_goldset_embeddings(self): 
         
-        self.sql_procedures.create_querygoldset_view()
-        self.sql_procedures.setup_embeddings_table(materialized_view_name = 'query_goldset_view', embedding_table_name = 'query_goldset_embeddings', linking_id = 'ground_truth_article_id', id_dtype = 'INT')
-        
+
         goldset_df = self.sql_procedures.retrieve_query_goldset(evidence_review_id = 'overall')
         
+       
         goldset_df['text'] = goldset_df['title']  + self.tokenizer.sep_token + goldset_df['abstract']
-        goldset_df['embedding'] = goldset_df['text'].apply(self._generate_embeddings)
+        
+        tqdm.pandas(desc=f"Generating embeddings for query goldset", 
+                   unit="article",
+                   ncols=125)
+        
+        goldset_df['embeddings'] = goldset_df['text'].progress_apply(
+            self._generate_embeddings
+        )
         #add to sql database 
         self.sql_procedures.add_embeddings_to_sql(input_df = goldset_df, embedding_table_name = 'query_goldset_embeddings', linking_id = 'ground_truth_article_id')
 
 
-    def generate_searchspace_embeddings(self): 
-    
-        # create lookup embedding tables on a per database basis 
-        for database in ['1','2','3','4']:
-            #retrieve all search result articles associated with a database 
-            self.logger.info(f'Retrieving search result articles for database {database}')
-            search_result_articles_df = self.sql_procedures.retrieve_search_result_articles_databaseview(database_id = database)
-            self.logger.info(f'Retrieved {len(search_result_articles_df)} search result articles for database {database}')
-            self.sql_procedures.setup_searchspace_database_embedding_table(database_id = database)
-            #generate embeddings 
-            #for convenience only do first 10 - we can run the rest on a more powerful machine 
-            self.logger.info(f'Generating embeddings for search result articles for database {database}')
-            search_result_articles_df['text'] = search_result_articles_df['title'] + self.tokenizer.sep_token + search_result_articles_df['abstract']
-            search_result_articles_df['embeddings'] = search_result_articles_df['text'].apply(self._generate_embeddings)
-            self.logger.info(f'Adding embeddings for search result articles associated with database: {database}')
-            self.sql_procedures.add_embeddings_to_sql(input_df = search_result_articles_df, embedding_table_name = f'searchspace_database_{database}_embeddings', linking_id = 'original_id')
+    def generate_searchspace_embeddings(self, database: int): 
+        '''
+        Given database id, generate embeddings for search result articles associated with that database 
+
+        Arg: 
+            database: int, database id to generate embeddings for 
+        '''
+
+        #retrieve all search result articles associated with a database 
+        with self.engine.connect() as conn: 
+                database_name = conn.execute(text(f"SELECT database_name FROM databases WHERE database_id = {database}")).scalar()
+
+        self.logger.info(f'Retrieving search result articles for database {database_name}')
+        search_result_articles_df = self.sql_procedures.retrieve_search_result_articles_databaseview(database_id = database)
+
+        self.logger.info(f'Retrieved {len(search_result_articles_df)} search result articles for database {database_name}')
+        try:
+            if search_result_articles_df['title'].isnull().sum() > 0 or search_result_articles_df['abstract'].isnull().sum() > 0:
+                self.logger.warning(f'There are null values for title or abstract in the search result articles for database {database_name}, filling empty values with empty strings')
+                search_result_articles_df['title'] = search_result_articles_df['title'].fillna('')
+                search_result_articles_df['abstract'] = search_result_articles_df['abstract'].fillna('')
+            
+            self.logger.info('Tokenizing search result articles')
+            search_result_articles_df['text'] = search_result_articles_df['title'] + self.tokenizer.sep_token + search_result_articles_df['abstract'] 
+            
+            self.logger.info(f'Generating embeddings for search result articles for database {database_name}')
+            tqdm.pandas(desc=f"Generating embeddings for search result articles for database {database_name}", 
+                        unit="article",
+                        ncols = 125) 
+            search_result_articles_df['embeddings'] = search_result_articles_df['text'].progress_apply(
+                self._generate_embeddings
+            )
+
+            #retrieve database name 
+            self.logger.info(f'Adding embeddings for search result articles associated with database: {database_name}')
+            self.sql_procedures.add_embeddings_to_sql(input_df = search_result_articles_df, embedding_table_name = f'searchspace_database_{database_name}_embeddings', linking_id = 'search_result_article_id')
+        except ValueError as e: 
+            self.logger.error(f'Error generating embeddings for search result articles associated with database: {database_name}: {e}')
+            raise e 
 
     def overarching_vector_search_with_rrf(self): 
 
@@ -252,11 +284,110 @@ class vector_search_implementation():
         eval_metrics_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_goldset = query_goldset_df, database_name = database_name)
         self.logger.info(f'Vector search evaluation pipeline complete')
         return eval_metrics_df
+    
+    def _check_embeddings_exist(self): 
+        """Check embedding tables and determine which need regeneration"""
+        
+        tables_to_regenerate = []
+        embedding_stats = {}
+        
+        table_checks = {
+            'query_goldset_embeddings': {
+                'df': self.sql_procedures.retrieve_query_goldset(evidence_review_id='overall'),
+                'desc': 'goldset'
+            },
+            'searchspace_database_pubmed_embeddings': {
+                'df': self.sql_procedures.retrieve_search_result_articles_databaseview(database_id='1'),
+                'desc': 'PubMed'
+            },
+            'searchspace_database_medline_embeddings': {
+                'df': self.sql_procedures.retrieve_search_result_articles_databaseview(database_id='2'),
+                'desc': 'Medline'
+            },
+            'searchspace_database_embase_embeddings': {
+                'df': self.sql_procedures.retrieve_search_result_articles_databaseview(database_id='3'),
+                'desc': 'Embase'
+            },
+            'searchspace_database_openalex_embeddings': {
+                'df': self.sql_procedures.retrieve_search_result_articles_databaseview(database_id='4'),
+                'desc': 'OpenAlex'
+            },
+        }
+        
+        for table_name, info in table_checks.items():
+            
+            expected_count = len(info['df'])
+            
+            check_query = f"""
+                SELECT 
+                    COUNT(*) as total_count,
+                    COUNT(CASE WHEN embeddings IS NOT NULL THEN 1 END) as valid_count
+                FROM {table_name}
+            """
+            
+            try:
+                with self.engine.connect() as conn:
+                    self.logger.info(f"Performing check for {table_name}")
+                    result = conn.execute(text(check_query)).fetchone()
+                    
+                    stats = {
+                        'total': result[0],
+                        'valid': result[1],
+                        'expected': expected_count
+                    }
+                    embedding_stats[table_name] = stats
+    
+                    
+                    needs_regeneration = (
+                        result[0] != expected_count or  
+                        result[1] != result[0]
+                    )
+
+                    if needs_regeneration:
+                        tables_to_regenerate.append(table_name)
+                        self.logger.warning(f"{info['desc']} embeddings need regeneration")
+                        self.logger.warning(f"Total rows: {stats['total']}, Valid rows (non-null embeddings): {stats['valid']}, Expected rows: {stats['expected']}")
+                    else:
+                        self.logger.info(f"{info['desc']} embeddings are valid, length of embeddings table is equal to expected number of rows, and there are no null values in the embeddings table")
+                        self.logger.info(f"Total rows: {stats['total']}, Valid rows (non-null embeddings): {stats['valid']}, Expected rows: {stats['expected']}")
+            except Exception as e:
+                self.logger.error(f"Error checking {table_name}: {str(e)}")
+                tables_to_regenerate.append(table_name)
+        
+        return tables_to_regenerate, embedding_stats
+
+    def generate_embeddings_if_needed(self):
+        """Generate embeddings only for tables that need it"""
+        
+        tables_to_regenerate, stats = self._check_embeddings_exist()
+        
+        if not tables_to_regenerate:
+            self.logger.info("All embedding tables are valid - no regeneration needed")
+            return
+        
+        self.logger.info(f"Need to regenerate embeddings for: {tables_to_regenerate}")
+        
+        # Generate specific embeddings as needed
+        if 'query_goldset_embeddings' in tables_to_regenerate:
+            self.generate_goldset_embeddings()
+            
+        if any('searchspace_database' in table for table in tables_to_regenerate):
+            for table in tables_to_regenerate: 
+                database_name = table.split('_')[2]
+                database_id = pd.read_sql(f"SELECT database_id FROM databases WHERE database_name = '{database_name}'", self.engine).iloc[0,0]
+                self.generate_searchspace_embeddings(database_id)
+
 
     def run_vector_search(self, search_type):
-
-        self.generate_goldset_embeddings()
-        self.generate_searchspace_embeddings()
+        #run check if embeddings already exist
+        self.sql_procedures.create_querygoldset_view()
+        self.sql_procedures.setup_embeddings_table(materialized_view_name = 'query_goldset_view', embedding_table_name = 'query_goldset_embeddings', linking_id = 'ground_truth_article_id', id_dtype = 'INT')
+        
+        for database in [1, 2, 3, 4]: 
+            self.sql_procedures.setup_searchspace_database_embedding_table(database_id = database)
+        
+        self.logger.info('Generating embeddings if needed')
+        self.generate_embeddings_if_needed()
 
         if search_type == 'overarching': 
             eval_metrics_df = self.overarching_vector_search_with_rrf()
