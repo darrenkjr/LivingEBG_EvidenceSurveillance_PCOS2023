@@ -71,7 +71,7 @@ class sql_data_migration:
             'gdgs' : 6, 
             'databases' : 4, 
             'search_types' : 2, 
-            'searchstrategy_types' : 3, 
+            'search_strategy_types' : 3, 
             'evidence_reviews' : 55, 
             'ground_truth_articles' : 1246, 
             'search_strategies' : 82, 
@@ -487,7 +487,7 @@ class sql_data_migration:
         })
 
         search_strategies_df['searchdetail_file_path'] = 'placeholder'
-        search_strategies_df['vector_search'] = False
+        search_strategies_df['vector_search'] = 'no'
 
         #check columns 
         if self._df_sqltable_column_check(search_strategies_df, table_name): 

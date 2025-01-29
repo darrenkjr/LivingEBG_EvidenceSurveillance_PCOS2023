@@ -33,13 +33,15 @@ class sql_procedures:
             raise ValueError(f'Invalid search type: {search_type}')
 
         query = f"""
-            WITH overarching_search_strat AS (
+            WITH search_strat AS (
                 SELECT {distinct_on_clause}
                     ss.search_strategy_id, 
                     ss.evidence_review_id, 
                     ss.database_id, 
                     ss.searchstrat_year_start, 
+                    ss.searchstrat_year_end,
                     ss.search_type_id, 
+                    ss.searchdetail_file_path,
                     d.database_name as database_name, 
                     st.name as search_type_name, 
                     ss_type.name as search_strategy_type_name
@@ -48,7 +50,7 @@ class sql_procedures:
                 JOIN search_types st ON ss.search_type_id = st.search_type_id 
                 JOIN search_strategy_types ss_type ON ss.search_strategy_type_id = ss_type.search_strategy_type_id 
                 WHERE st.name = '{search_type}' 
-                    AND ss.vector_search = FALSE
+                    AND ss.vector_search = 'no'
                 ORDER BY                          
                     ss.evidence_review_id,
                     ss.search_strategy_id,
@@ -56,7 +58,7 @@ class sql_procedures:
                     ss.database_id
                     )
 
-            SELECT * FROM overarching_search_strat
+            SELECT * FROM search_strat
             """
 
         with self.engine.connect() as conn: 
@@ -155,6 +157,41 @@ class sql_procedures:
             self.logger.error(f'Error creating goldset view: {e}')
             raise e 
         
+    def create_query_evidencereview_topic_view(self): 
+        '''
+        Creates a view of the evidence reviews, with the topic of the evidence review as a column 
+        '''
+
+        #get relevant evidence review ids 
+        evidence_review_ids = pd.read_sql(
+            f"""SELECT DISTINCT er.evidence_review_id 
+            FROM evidence_reviews er
+            JOIN search_strategies ss 
+            ON er.evidence_review_id = ss.evidence_review_id
+            WHERE er.evidence_review_id != 'overall'""", self.engine)
+         
+        evidence_review_ids = "'" + "','".join(map(str, evidence_review_ids['evidence_review_id'])) + "'"
+
+
+        queries = [f"""
+            CREATE MATERIALIZED VIEW IF NOT EXISTS query_evidencereview_topic_view AS 
+                SELECT * FROM evidence_reviews
+                   WHERE evidence_review_id IN ({evidence_review_ids})
+                """,
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_query_evidencereview_topic_view_id 
+                ON query_evidencereview_topic_view (evidence_review_id);
+                """
+                ]
+    
+        try: 
+            with self.engine.begin() as conn:
+                for query in queries: 
+                    conn.execute(text(query))
+                self.logger.info(f'Query evidence review topic view created')
+        except Exception as e: 
+            self.logger.error(f'Error creating evidence review topic view: {e}')
+            raise e 
 
         
     def create_evaluation_set_view_2017included(self): 
@@ -241,17 +278,20 @@ class sql_procedures:
         return eval_df
     # Compare the data directly
 
-    def setup_embeddings_table(self, materialized_view_name, embedding_table_name, linking_id, id_dtype): 
+    def setup_embeddings_table(self, materialized_view_name, embedding_table_name, linking_table_name, linking_id, id_dtype): 
         '''
         Creates a table in the sql database for storing embeddings, linked to a materialized view.
         Args: 
-            materialized_view_name: name of the materialized view (e.g., 'groundtruth_eval_set_2017new')
+            materialized_view_name: name of the materialized view
             embedding_table_name: name of the embeddings table (e.g., 'article_embeddings')
+            linking_table_name: name of the table that the embeddings are linked to (e.g., 'ground_truth_articles')
             linking_id: the id column for linking (e.g., 'ground_truth_article_id')
+            id_dtype: the data type of the id column (e.g., 'INT')
         '''
 
 
         try:
+            self.logger.info(f'Setting up embeddings table for {materialized_view_name}')
             with self.engine.begin() as conn:
                 check_view_query = f"""
                     SELECT EXISTS (
@@ -271,7 +311,7 @@ class sql_procedures:
                         {linking_id} {id_dtype} PRIMARY KEY,
                         embeddings vector(768),
                         FOREIGN KEY ({linking_id}) 
-                            REFERENCES ground_truth_articles({linking_id})
+                            REFERENCES {linking_table_name}({linking_id})
                             ON DELETE CASCADE
                     );
                 """]
@@ -283,6 +323,9 @@ class sql_procedures:
         except Exception as e: 
             self.logger.error(f'Error creating embeddings table {embedding_table_name}: {e}')
             raise e 
+
+
+
 
     def add_embeddings_to_sql(self, embedding_table_name, input_df, linking_id): 
         '''
@@ -299,7 +342,7 @@ class sql_procedures:
             # Create list of dictionaries with direct values
             data = [
                 {
-                    linking_id: int(id_val),
+                    linking_id: int(id_val) if linking_id == 'ground_truth_article_id' else id_val,
                     'embeddings': emb.flatten().tolist()  # Just pass as list, no Vector wrapper needed
                 }
                 for id_val, emb in zip(input_df[linking_id], input_df['embeddings'])
@@ -352,7 +395,7 @@ class sql_procedures:
             self.logger.error(f'Error creating searchspace database embedding table for database: {database_name}: {e}')
             raise e 
         
-    def create_new_searchstrat_vectorsearch(self, input_df): 
+    def create_new_searchstrat_vectorsearch(self, input_df, vector_search_type, search_type_id): 
         '''
         Creates a new search strategy, with a vector search flag.
 
@@ -362,21 +405,74 @@ class sql_procedures:
             None, but creates a new search strategy entry in the databse 
         '''
 
-        #insert new search stragies into the table 
         with self.engine.begin() as conn: 
-            latest_search_strat_id = conn.execute(text("SELECT COALESCE(MAX(search_strategy_id), 0) FROM search_strategies")).scalar()
-            # Use range instead of index
-            input_df['search_strategy_id'] = range(latest_search_strat_id + 1, latest_search_strat_id + 1 + len(input_df),1)
-            filtered_input_df = sql_data_migration._prior_id_check(input_df, 'search_strategy_id', 'search_strategies', engine = self.engine, logger = self.logger)
+            # First check which original search strategies already have vector search versions
+            #grab column names 
+            col_query = """
+                SELECT column_name 
+                FROM information_schema.columns
+                WHERE table_name = 'search_strategies' 
+                AND table_schema = 'public';
+            """
+            relevant_cols = pd.read_sql(col_query, conn)['column_name'].tolist()
 
-            if not filtered_input_df.empty: 
-                #drop not essential columns 
-                _input_df = filtered_input_df.drop(columns = ['database_name', 'search_strategy_type_name', 'original_search_strategy_id', 'search_type_name'])
-            _input_df.to_sql('search_strategies', conn, if_exists = 'append', index = False)
+            #grab existing vector search strategies 
+            existing_check = f"""
+                SELECT *
+                FROM search_strategies 
+                WHERE vector_search = '{vector_search_type}' AND search_type_id = {search_type_id};
+            """
+            existing_df = pd.read_sql(existing_check, conn)
 
-        return filtered_input_df
+            if existing_df.empty: 
+                self.logger.info(f'No existing vector search strategies found. Adding all input search strategies')
+                new_df = input_df.copy()
+            else:
+                self.logger.info(f'Existing vector search strategies found for vector search type: {vector_search_type}. Number of existing vector search strategies: {existing_df.shape[0]}')
+                self.logger.info(f'Performing checks')
+                #check input data with existing data with merge 
+                compare_cols = relevant_cols.copy()
+                compare_cols.remove('search_strategy_id')
+                comparison = input_df[compare_cols].merge(
+                    existing_df[compare_cols], 
+                    on = compare_cols, 
+                    how = 'left', 
+                    indicator = True)
+                
+                new_df = input_df.loc[comparison['_merge'] == 'left_only'].copy()
+            
+            if len(new_df) > 0: 
+                self.logger.info(f'Found {len(new_df)} new search strategies to add')
+                
+                # Get latest ID and generate new sequential IDs
+                latest_search_strat_id = conn.execute(text(
+                    "SELECT COALESCE(MAX(search_strategy_id), 0) FROM search_strategies;"
+                )).scalar()
 
-    def run_vector_search(self, original_searchstrat_id, searchstrat_id, evidence_review_id, topic_specific_overall_flag = False): 
+                new_df['search_strategy_id'] = range(
+                    latest_search_strat_id + 1, 
+                    latest_search_strat_id + 1 + len(new_df)
+                )
+
+                # No need to drop _merge as it's not in new_df
+                new_df[relevant_cols].to_sql('search_strategies', conn, if_exists='append', index=False)
+                self.logger.info(f"Created {len(new_df)} new vector search strategies")
+                return new_df
+            
+            else: 
+                self.logger.info('No new search strategies to add')
+                try: 
+
+                    assert len(existing_df) == len(input_df), 'The number of existing search strategies does not match the number of input search strategies'
+                    existing_df['original_search_strategy_id'] = input_df['original_search_strategy_id']
+                    return existing_df
+                except AssertionError as e: 
+                    self.logger.error(f'Error matching existing search strategies to input original search strategies: {e}')
+                    raise e 
+                
+
+
+    def run_vector_search(self, original_searchstrat_id, searchstrat_id, evidence_review_id, vector_search_type, topic_specific_overall_flag = False): 
         '''
         Runs vector search for a given search strategy id, for a given evidence_review_id
         First - retrieve query vectors, then retrieve searchspace embeddings with: 
@@ -392,30 +488,25 @@ class sql_procedures:
             view of search results, with cosine similiarity socres and corresponding rank
         '''
 
-        self.logger.info(f'Cleaning up previous vector search results if applicable')
+        # self.logger.info(f'Cleaning up previous vector search results if applicable')
 
-        
-        if topic_specific_overall_flag: 
-            goldset_query_filter = f"WHERE evidence_review_id = {evidence_review_id}"
-        else: 
-            goldset_query_filter = f""
-            evidence_review_id = 'overall'
+        # clean_up_query = f"""
+        #     DROP MATERIALIZED VIEW IF EXISTS vector_search_results_{searchstrat_id}_{evidence_review_id} CASCADE;
+        # """
 
-
-        clean_up_query = f"""
-            DROP MATERIALIZED VIEW IF EXISTS vector_search_results_{searchstrat_id}_{evidence_review_id} CASCADE;
-        """
-
-
+        query_table_name, query_vector_id, goldset_query_filter, evidence_review_id = self._prepare_query_vector_queries(topic_specific_overall_flag, vector_search_type, evidence_review_id)
 
         vector_search_query = f""" 
 
         CREATE MATERIALIZED VIEW IF NOT EXISTS "vector_search_results_{searchstrat_id}_{evidence_review_id}" AS 
+        -- Retrieve query vectors, depending on the query table name, goldset query filter (which changes depending on the vector search type)
         WITH query_vectors AS (
-            SELECT ground_truth_article_id, embedding 
-            FROM query_goldset_embeddings {goldset_query_filter}
+            SELECT {query_vector_id}, embeddings 
+            FROM {query_table_name} {goldset_query_filter}
         ),
 
+        -- Retrieve search result articles and embeddings, depending on the database id,  taken from the orignal search strategy id
+        
         search_result_articles_emb AS (
             SELECT
                 sra.search_result_article_id, 
@@ -424,63 +515,149 @@ class sql_procedures:
                 ss.search_strategy_id, 
                 CASE    
                     WHEN ss.database_id = 1 THEN (
-                        SELECT embedding 
+                        SELECT embeddings 
                         FROM searchspace_database_pubmed_embeddings 
                         WHERE search_result_article_id = sra.search_result_article_id
                     )
                     WHEN ss.database_id = 2 THEN (
-                        SELECT embedding 
+                        SELECT embeddings 
                         FROM searchspace_database_medline_embeddings 
                         WHERE search_result_article_id = sra.search_result_article_id
                     )
                     WHEN ss.database_id = 3 THEN (
-                        SELECT embedding 
+                        SELECT embeddings 
                         FROM searchspace_database_embase_embeddings 
                         WHERE search_result_article_id = sra.search_result_article_id
                     )
                     WHEN ss.database_id = 4 THEN (
-                        SELECT embedding 
+                        SELECT embeddings 
                         FROM searchspace_database_openalex_embeddings 
                         WHERE search_result_article_id = sra.search_result_article_id
                     )
-                END as embedding 
+                END as embeddings 
             FROM search_result_articles sra 
             JOIN search_strategies ss ON sra.search_strategy_id = ss.search_strategy_id 
             WHERE ss.search_strategy_id = {original_searchstrat_id}
         ),
 
-        raw_cosine_sim_ranked AS (
+        -- Calculate cosine similarity between query vectors and search result articles  
+        raw_cosine_sim AS (
             SELECT 
-                query_vectors.ground_truth_article_id, 
+                query_vectors.{query_vector_id}, 
                 search_result_articles_emb.search_result_article_id, 
                 search_result_articles_emb.search_strategy_id, 
-                1 - (query_vectors.embedding <=> search_result_articles_emb.embedding) AS cosine_similarity,
-                ROW_NUMBER() OVER (
-                PARTITION BY ground_truth_article_id 
-                ORDER BY cosine_similarity DESC) as rank
+                1 - (query_vectors.embeddings <=> search_result_articles_emb.embeddings) AS cosine_similarity
             FROM query_vectors 
             CROSS JOIN search_result_articles_emb  
-            WHERE search_result_articles_emb.embedding IS NOT NULL
+            WHERE search_result_articles_emb.embeddings IS NOT NULL
+            ), 
+
+        -- Rank the cosine similarity scores 
+        raw_cosine_sim_ranked AS (
+            SELECT
+                {query_vector_id}, 
+                search_result_article_id, 
+                search_strategy_id, 
+                cosine_similarity, 
+                ROW_NUMBER() OVER (
+                    PARTITION BY {query_vector_id} 
+                    ORDER BY cosine_similarity DESC
+                ) as rank
+            FROM raw_cosine_sim
             )
 
-        SELECT * FROM raw_cosine_sim_ranked;
-
+        SELECT * FROM raw_cosine_sim_ranked
+        ORDER BY {query_vector_id}, rank;
         """
+
         try:
             with self.engine.begin() as conn: 
 
-                self.logger.info(f'Cleaning up previous vector search results for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
-                conn.execute(text(clean_up_query))
+                # self.logger.info(f'Cleaning up previous vector search results for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
+                # conn.execute(text(clean_up_query))
 
-                self.logger.info(f'Running vector search for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
+                self.logger.info(f'Running vector search for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id} for vector search type: {vector_search_type}')
                 conn.execute(text(vector_search_query))
-                self.logger.info(f'Vector search completed for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
+                self.logger.info(f'Vector search completed for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id} for vector search type: {vector_search_type}')
 
         except Exception as e: 
             self.logger.error(f'Error running vector search for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}: {e}')
             raise e 
+    
+    def retrieve_query_vector_ids(self, search_strat_id, evidence_review_id, idcol): 
+        '''
+        Retrieves the query vector ids for a given search strategy id and evidence review id 
+        '''
+        query = f"""
+            SELECT {idcol} FROM vector_search_results_{search_strat_id}_{evidence_review_id}
+        """
+        with self.engine.begin() as conn:
+            return pd.read_sql(query, conn)
+        
+    def _prepare_query_vector_queries(self, topic_specific_overall_flag, vector_search_type, evidence_review_id): 
+        '''
+        Prepares the query vector queries for the vector search 
+        '''
+        if topic_specific_overall_flag:  # Topic-specific case
+            if vector_search_type == 'zero-shot': 
+                query_table_name = 'query_evidencereview_topic_embeddings'
+                id = 'evidence_review_id'
+                goldset_query_filter = f"WHERE evidence_review_id = '{evidence_review_id}'"  
 
-    def rrf_combine_results(self, searchstrat_id, evidence_review_id): 
+            elif vector_search_type == 'one-shot': 
+                query_table_name = 'query_goldset_embeddings'
+                id = 'ground_truth_article_id'
+                goldset_query_filter = f"""
+                    JOIN (
+                        SELECT DISTINCT ON (qgv.evidence_review_id) 
+                            qgv.{id}
+                        FROM query_goldset_view qgv
+                        ORDER BY 
+                            qgv.evidence_review_id,
+                            MD5(qgv.ground_truth_article_id::text)
+                        ) selected_goldset_articles 
+                    ON {query_table_name}.{id} = selected_goldset_articles.selected_article_id
+                """
+                
+            elif vector_search_type == 'few-shot': 
+                query_table_name = 'query_goldset_embeddings'
+                id = 'ground_truth_article_id'
+                goldset_query_filter = f"WHERE evidence_review_id = '{evidence_review_id}'"
+
+        else:  #overarching case 
+            evidence_review_id = 'overall'
+            if vector_search_type == 'zero-shot': 
+                query_table_name = 'query_evidencereview_topic_embeddings'
+                id = 'evidence_review_id'
+                 #get all evidence review topic embeddings 
+                goldset_query_filter = f""
+
+            elif vector_search_type == 'one-shot': 
+            
+                query_table_name = 'query_goldset_embeddings'
+                id = 'ground_truth_article_id'
+                #get one article embedding per evidence review id (total query vector should equal all evidence review topic embeddings)
+                goldset_query_filter = f"""
+                    JOIN (
+                        SELECT DISTINCT ON (evidence_review_id) 
+                            qgv.{id} as selected_article_id
+                        FROM query_goldset_view qgv
+                        ORDER BY 
+                            qgv.evidence_review_id,
+                            MD5(qgv.{id}::text)
+                        ) selected_goldset_articles 
+                    ON {query_table_name}.{id} = selected_goldset_articles.selected_article_id
+                """
+            elif vector_search_type == 'few-shot': 
+                query_table_name = 'query_goldset_embeddings'
+                id = 'ground_truth_article_id'
+                #get all prepared goldset embeddings (which amounts to 3 articles per evidence review id)
+                goldset_query_filter = f""
+
+        return query_table_name, id, goldset_query_filter, evidence_review_id
+
+
+    def rrf_combine_results(self, original_searchstrat_id,searchstrat_id, evidence_review_id): 
         '''
         Combines the results of the vector search into a single dataframe, with RRF scores 
         '''
@@ -488,20 +665,39 @@ class sql_procedures:
         query = f"""
             SELECT * FROM vector_search_results_{searchstrat_id}_{evidence_review_id}
         """
-
+        self.logger.info(f'Retrieving vector search results for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
         with self.engine.begin() as conn: 
             sim_df = pd.read_sql(query, conn)
         
+        #calculate rrf score 
+        self.logger.info(f'Calculating RRF scores')
         sim_df['rrf_score'] = 1 / (60 + sim_df['rank'])
         rrf_sim_df = sim_df.groupby('search_result_article_id').agg({
-            'rrf_score': 'sum',
-            'raw_cosine_sim': 'mean',
-            'search_strategy_id': 'first'
+            'rrf_score': 'sum', #sum of rrf scores across all input query vectors
+            'cosine_similarity': 'mean', #averge cosine similiarity across all input query vectors
+            'search_strategy_id': 'first' #search strategy id of the input query vector
             }).reset_index().copy()
 
-        rrf_sim_df['combined_rank'] = rrf_sim_df['rrf_score'].rank(method = 'first', ascending = False)
+        rrf_sim_df['combined_rank_rrf'] = rrf_sim_df['rrf_score'].rank(method = 'first', ascending = False) 
+        #note - if there is a tie, this will get sequential ranks 
         rrf_sim_df = rrf_sim_df.sort_values(by = ['rrf_score'], ascending = False)
+
+        #retrieve corresponding serach result articles based on search_strat_id (original)
+        sra_df = pd.read_sql(f"SELECT * FROM search_result_articles WHERE search_strategy_id = {original_searchstrat_id}", self.engine)
+        try: 
+            with self.engine.begin() as conn: 
+                assert len(rrf_sim_df) == len(sra_df)
+                self.logger.info(f'rrf_sim_df and sra_df have the same number of rows, moving on to merging')
+                rrf_sim_df = rrf_sim_df.merge(sra_df, on='search_result_article_id', how='left', suffixes = ('_rrf', '_unranked'))
+        except AssertionError as e: 
+            self.logger.error(f'The number of search result articles does not match the number of search result articles in the vector search results: {e}')
+            raise e 
+        except Exception as e: 
+            self.logger.error(f'Error retrieving search result articles for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}: {e}')
+            raise e 
         
+        
+                
         return rrf_sim_df
     
     def retrieve_evaluation_set(self, evidence_review_id): 
@@ -538,6 +734,19 @@ class sql_procedures:
             query_goldset_df = pd.read_sql(query, conn)
         return query_goldset_df
     
+    def retrieve_query_evidencereview_topics(self, evidence_review_id): 
+        if evidence_review_id == 'overall': 
+            query = f"""
+                SELECT * FROM query_evidencereview_topic_view
+            """
+        else: 
+            query = f"""
+            SELECT * FROM query_evidencereview_topic_view WHERE evidence_review_id = {evidence_review_id}
+            """
+        with self.engine.begin() as conn: 
+            query_evidencereview_topic_df = pd.read_sql(query, conn)
+        return query_evidencereview_topic_df
+
     
     def retrieve_evidence_review_ids(self, search_type: str) -> list: 
         '''

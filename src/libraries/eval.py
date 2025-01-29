@@ -17,6 +17,7 @@ class eval_metrics:
     f2_score: float
     f3_score: float
 
+@dataclass
 class vectorsearch_eval_metrics: 
     nnr_raw: int # nnr before cutoff 
     nnr_first : int #nnr before screening first correct result 
@@ -40,6 +41,7 @@ class search_evaluation:
 
     database_eval_id_mappings = {
         'oa': 'retrieved_oa_id',
+        'openalex' : 'retrieved_oa_id',
         'embase': 'retrieved_embase_id',
         'pubmed': 'retrieved_pubmed_id', 
         'medline' : 'retrieved_pubmed_id',
@@ -47,6 +49,7 @@ class search_evaluation:
 
     search_results_id_mappings = {
         'oa': 'id',
+        'openalex' : 'id',
         'embase': 'accession_number',
         'pubmed': 'pmid',
         'medline' : 'id'
@@ -85,6 +88,9 @@ class search_evaluation:
             'oa': (Path(__file__).parent.parent / 'search_results' / 'openalex' / self.search_type / self.strategy_type 
                 if self.strategy_type else 
                 Path(__file__).parent.parent / 'search_results' / 'openalex' / self.search_type),
+            'openalex' : (Path(__file__).parent.parent / 'search_results' / 'openalex' / self.search_type / self.strategy_type 
+                if self.strategy_type else 
+                Path(__file__).parent.parent / 'search_results' / 'openalex' / self.search_type), 
             'embase': Path(__file__).parent.parent / 'search_results' / 'embase' / self.search_type,
             'pubmed': Path(__file__).parent.parent / 'search_results' / 'pubmed' / self.search_type,
             'medline': Path(__file__).parent.parent / 'search_results' / 'medline' / self.search_type,
@@ -155,6 +161,8 @@ class search_evaluation:
         if self.consolidated_results_path.exists(): 
             self.logger.info(f'Consolidated results already exist, loading from {str(self.consolidated_results_path)}')
             results_df = pd.read_parquet(self.consolidated_results_path)
+            return results_df
+
 
         else: 
             result_df = pd.DataFrame()
@@ -390,9 +398,7 @@ class search_evaluation:
     
     def _evaluate_vs_matches(self, evaluation_df : pd.DataFrame, rrf_sim_result_df : pd.DataFrame, database_name : str) -> pd.DataFrame: 
 
-        if database_name == 'openalex': 
-            #clean up leading https://openalex.org/
-            rrf_sim_result_df['original_id'] = rrf_sim_result_df['original_id'].str.replace('https://openalex.org/', '').str.lower()
+
 
         eval_id_dct = {
             'pubmed' : 'retrieved_pubmed_id',
@@ -401,18 +407,27 @@ class search_evaluation:
             'openalex' : 'retrieved_oa_id'
         }
         eval_id_col = eval_id_dct[database_name]
+        
+        if database_name == 'openalex': 
+            #clean up leading https://openalex.org/
+            rrf_sim_result_df['original_id'] = rrf_sim_result_df['original_id'].str.replace('https://openalex.org/', '').str.lower().str.strip()
+            #make sure same treatment foe evaluation df 
+            evaluation_df[eval_id_col] = evaluation_df[eval_id_col].str.replace('https://openalex.org/', '').str.lower().str.strip()
+        else: 
+            rrf_sim_result_df['original_id'] = rrf_sim_result_df['original_id'].str.lower().str.strip()
+            evaluation_df[eval_id_col] = evaluation_df[eval_id_col].str.lower().str.strip()
 
 
         matches = evaluation_df.merge(
         rrf_sim_result_df,
         left_on=eval_id_col,
         right_on='original_id',
-        how='inner'
-    )
+        how='inner')
+        
         return matches
 
     
-    def calc_vectorsearch_metrics(self, comparison_df: pd.DataFrame, raw_results_df: pd.DataFrame, query_goldset_df: pd.DataFrame) -> vectorsearch_eval_metrics:
+    def calc_vectorsearch_metrics(self, comparison_df: pd.DataFrame, raw_results_df: pd.DataFrame, query_vector_df: pd.DataFrame) -> vectorsearch_eval_metrics:
         '''
         Calculates vector search metrics for a given evaluation set (dependent on evidence_review_id further upstream) raw results set, 
         and query_goldset_df (also dependent on evidence_review_id further upstream)
@@ -427,28 +442,36 @@ class search_evaluation:
         '''
 
         #dedupe results df, and make sure that it is sorted by ranking 
-        raw_results_df_dedupe = raw_results_df.drop_duplicates(subset = 'original_id').sort_values('rank').copy()
+        raw_results_df_dedupe = raw_results_df.sort_values('combined_rank_rrf').copy()
         #evaluate matches 
         matches = self._evaluate_vs_matches(comparison_df, raw_results_df_dedupe, self.database)
         #non ranked metrics 
         nnr_raw = len(raw_results_df_dedupe) # total number of results to read before looking at ranking 
+        self.logger.info(f'Total number of results to read before looking at ranking: {nnr_raw}')
         n_retrieved = len(matches) #total number of sucessful matches / results retrived 
+        self.logger.info(f'Total number of sucessful matches / results retrived: {n_retrieved}')
         n_missed = len(comparison_df) - len(matches) #total number of missed results 
+        self.logger.info(f'Total number of missed results: {n_missed}')
         recall = len(matches) / len(comparison_df) #recall of the search (raw)
+        self.logger.info(f'Recall of the search (raw): {recall}')
         precision = len(matches) / len(raw_results_df_dedupe) #precision of the search (raw)=
+        self.logger.info(f'Precision of the search (raw): {precision}')
         f1 = self._calc_fscore(precision, recall, 1)
         f2 = self._calc_fscore(precision, recall, 2)
         f3 = self._calc_fscore(precision, recall, 3)
 
-        matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_goldset_df['ground_truth_article_id'])]
+        matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_vector_df['ground_truth_article_id'])]
         #ranked metrics 
         if len(matches) > 0: 
-            matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_goldset_df['ground_truth_article_id'])]
+            matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_vector_df['ground_truth_article_id'])]
             #find first match that isn't in the goldset (ie: a theoretically new match)
-            nnr_first = matches_filter_goldset['rank'].min()
-            similarity_threshold_cutoff = matches_filter_goldset['normalized_cosine_sim'].min()
-            result_cutoff_df = raw_results_df_dedupe.query(f'normalized_cosine_sim >= {similarity_threshold_cutoff}')
+            nnr_first = matches_filter_goldset['combined_rank_rrf'].min()
+            self.logger.info(f'Rank of first match not in goldset: {nnr_first}')
+            similarity_threshold_cutoff = matches_filter_goldset['cosine_similarity'].min()
+            self.logger.info(f'Similarity threshold cutoff: {similarity_threshold_cutoff}')
+            result_cutoff_df = raw_results_df_dedupe.query(f'cosine_similarity >= {similarity_threshold_cutoff}')
             nnr_threshold = len(result_cutoff_df)
+            self.logger.info(f'Number of results to read after similarity threshold cutoff: {nnr_threshold}')
         
             recall_at_k_dct = {}
             for k in [10, 100, 1000]: 
@@ -465,7 +488,7 @@ class search_evaluation:
         assert recall_cutoff == recall 
         recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
 
-        return vectorsearch_eval_metrics(nnr_raw, nnr_first, nnr_threshold, n_retrieved, n_missed, recall, precision, f1, f2, f3, recall_at_10, recall_at_100, recall_at_1000, similarity_threshold_cutoff), result_cutoff_df
+        return vectorsearch_eval_metrics(nnr_raw= nnr_raw, nnr_first= nnr_first, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff), result_cutoff_df
     
     
     def _calc_fscore(self, precision: float, recall: float, beta: float = 1) -> float: 
@@ -518,18 +541,21 @@ class search_evaluation:
             
             return self.process_search_results(result_df)
 
-    def run_vectorsearch_eval_pipeline(self, result_set: pd.DataFrame, evaluation_set: pd.DataFrame, query_goldset_df: pd.DataFrame): 
+    def run_vectorsearch_eval_pipeline(self, result_set: pd.DataFrame, evaluation_set: pd.DataFrame, query_vector_df: pd.DataFrame, database_name: str, search_strat_df : pd.DataFrame): 
 
-        if self.vector_search_flag == True: 
-            
-            vector_search_metrics, result_cutoff_df = self.calc_vectorsearch_metrics(comparison_df = evaluation_set, raw_results_df = result_set, query_goldset_df = query_goldset_df)
-            vector_search_metrics_df = pd.DataFrame.from_records([asdict(vector_search_metrics)])
-            #add metadata 
-            vector_search_metrics_df['database'] = self.database
-            vector_search_metrics_df['search_type'] = self.search_type
-            vector_search_metrics_df['search_strategy'] = self.strategy_type
-            vector_search_metrics_df['vector_search'] = self.vector_search_flag
-            vector_search_metrics_df['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M')
-            return vector_search_metrics_df, result_cutoff_df
+        vector_search_metrics, result_cutoff_df = self.calc_vectorsearch_metrics(comparison_df = evaluation_set, raw_results_df = result_set, query_vector_df = query_vector_df)
+        vector_search_metrics_df = pd.DataFrame.from_records([asdict(vector_search_metrics)])
+        
+        
+        #add metadata 
+        vector_search_metrics_df['database'] = database_name
+        vector_search_metrics_df['search_type'] = search_strat_df['search_type_id']
+        vector_search_metrics_df['search_strategy'] = search_strat_df['search_strategy_type_id']
+        vector_search_metrics_df['vector_search_type'] = search_strat_df['vector_search']
+        vector_search_metrics_df['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+        vector_search_metrics_df['search_strategy_id'] = search_strat_df['search_strategy_id']
+        vector_search_metrics_df['evidence_review_id'] = search_strat_df['evidence_review_id']
+        return vector_search_metrics_df, result_cutoff_df
+
 
 

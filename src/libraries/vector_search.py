@@ -19,23 +19,16 @@ load_dotenv()
 class vector_search_implementation(): 
 
     def __init__(self, model_name = 'allenai/specter2_base', logger = None, df = None): 
-
+        self.logger = logger
+        self.logger.info(f'Initilialzing embedding model: {model_name}')
         self.model = AutoAdapterModel.from_pretrained(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.logger = logger
-        #check if we're in WSL environment 
-        self._database_check()
-        #check for cuda 
+        
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        
-    
         self.model.load_adapter("allenai/specter2", source="hf", load_as="specter2", set_active=True)
         self.model.to(self.device)
 
-        self.sql_procedures = sql_procedures(logger = self.logger, engine = self.engine)
-
-    def _database_check(self):
+        self.logger.info('Connecting to database')
         self.wsl_flag = os.environ.get('WSL_DISTRO_NAME') is not None
         if self.wsl_flag: 
             os.environ['PGHOST'] = '/var/run/postgresql' 
@@ -49,7 +42,14 @@ class vector_search_implementation():
             self.logger.info(f'Connected to database {db_name}')
         except Exception as e: 
             self.logger.error(f'Error connecting to database {db_name}: {e}')
-            raise e 
+            raise e  
+
+
+
+        self.sql_procedures = sql_procedures(logger = self.logger, engine = self.engine)
+
+    def _database_check(self):
+
         #check existence of ground truth table 
         self.logger.info(f'Checking existence of ground truth table')
         try: 
@@ -114,6 +114,20 @@ class vector_search_implementation():
         #add to sql database 
         self.sql_procedures.add_embeddings_to_sql(input_df = goldset_df, embedding_table_name = 'query_goldset_embeddings', linking_id = 'ground_truth_article_id')
 
+    def generate_evidencereview_topic_embeddings(self): 
+        '''
+        Generate embeddings for evidence review topics 
+        '''
+        er_df = self.sql_procedures.retrieve_query_evidencereview_topics(evidence_review_id='overall')
+        tqdm.pandas(desc=f"Generating embeddings for evidence review topics", 
+                   unit="article",
+                   ncols=125)
+        
+        er_df['embeddings'] = er_df['question'].progress_apply(
+            self._generate_embeddings
+        )
+        self.sql_procedures.add_embeddings_to_sql(input_df = er_df, embedding_table_name = 'query_evidencereview_topic_embeddings', linking_id = 'evidence_review_id')
+
 
     def generate_searchspace_embeddings(self, database: int): 
         '''
@@ -155,7 +169,7 @@ class vector_search_implementation():
             self.logger.error(f'Error generating embeddings for search result articles associated with database: {database_name}: {e}')
             raise e 
 
-    def overarching_vector_search_with_rrf(self): 
+    def overarching_vector_search_with_rrf(self, vector_search_type: str): 
 
         '''
         Run vector serach with cosine similiarity. First - genreate goldset embeddings (if not already done)
@@ -167,27 +181,33 @@ class vector_search_implementation():
 
         #create new search strats - which is a copy of the overarching search start, but with a vector search flag
         temp_df = overarching_searchstrat_df.copy()
-        temp_df['vector_search'] = True
+
+        input_searchstrat_df = pd.DataFrame()
+
+        temp_df['vector_search'] = vector_search_type
         temp_df['search_strategy_type_id'] = 3
         temp_df['original_search_strategy_id'] = temp_df['search_strategy_id']
+        search_type_id = temp_df['search_type_id'].unique()[0]
         self.logger.info(f'Creating new search strats with vector search flag for overarching search strats')
-        input_searchstrat_df = self.sql_procedures.create_new_searchstrat_vectorsearch(temp_df)
+        _input_searchstrat_df = self.sql_procedures.create_new_searchstrat_vectorsearch(temp_df, vector_search_type = vector_search_type, search_type_id = search_type_id)
+        input_searchstrat_df = pd.concat([input_searchstrat_df, _input_searchstrat_df])
+
+        #retrieve original search strat id, evidence review id and new search strat id 
         eval_metrics_df_list = []
         result_cutoff_df_list = []
-
-        for original_searchstrat_id, searchstrat_id, evidence_review_id in zip(input_searchstrat_df['original_search_strategy_id'], input_searchstrat_df['search_strategy_id'], input_searchstrat_df['evidence_review_id'],): 
-            self.sql_procedures.run_vector_search(original_searchstrat_id = original_searchstrat_id, searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id)
+        for original_searchstrat_id, searchstrat_id, evidence_review_id, vector_search_type in zip(input_searchstrat_df['original_search_strategy_id'], input_searchstrat_df['search_strategy_id'], input_searchstrat_df['evidence_review_id'], input_searchstrat_df['vector_search']): 
+            self.sql_procedures.run_vector_search(original_searchstrat_id = original_searchstrat_id, searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id, vector_search_type = vector_search_type)
             #ranked results output 
-            rrf_sim_result_df = self.sql_procedures.rrf_combine_results(searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id)
+            rrf_sim_result_df = self.sql_procedures.rrf_combine_results(searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id, original_searchstrat_id = original_searchstrat_id)
             #conduct evaluation 
-            eval_metrics_df, result_cutoff_df = self._evaluate_vector_search(rrf_sim_result_df, evidence_review_id = evidence_review_id, search_strat_id = searchstrat_id,  search_type = 'overarching')
+            eval_metrics_df, result_cutoff_df = self._evaluate_vector_search(rrf_sim_result_df, evidence_review_id = evidence_review_id, search_strat_id = searchstrat_id,  search_type = 'overarching', vectorsearch_type = vector_search_type)
             eval_metrics_df_list.append(eval_metrics_df)
         
         eval_metrics_df_all = pd.concat(eval_metrics_df_list)
 
         return eval_metrics_df_all
 
-    def topic_specific_vector_search_with_rrf(self): 
+    def topic_specific_vector_search_with_rrf(self, vector_search_type:str): 
 
         """
         Retrieves overarching search strats and converts this to topic specific search strats using vector search 
@@ -200,7 +220,7 @@ class vector_search_implementation():
             'evidence_review_id': evidence_review_id_list,
             'search_type_id': 2,
             'search_strategy_type_id': 3,
-            'vector_search': True,
+            'vector_search': vector_search_type,
             'searchstrat_year_start': 1990,
             'searchstrat_year_end': 2022,
             'searchdetail_file_path': 'placeholder'
@@ -224,7 +244,7 @@ class vector_search_implementation():
         assert len(input_searchstrat_df) == len(evidence_review_id_list) * len(database_df), "The number of rows in input_df should be equal to the number of evidence review IDs times 4."
 
 
-        topic_specific_vs_searchstrat_df = self.sql_procedures.create_new_searchstrat_vectorsearch(input_searchstrat_df).drop(columns = ['original_search_strategy_id']).copy()
+        topic_specific_vs_searchstrat_df = self.sql_procedures.create_new_searchstrat_vectorsearch(input_searchstrat_df, vector_search_type).drop(columns = ['original_search_strategy_id']).copy()
 
         eval_metrics_df_list = []
 
@@ -261,9 +281,9 @@ class vector_search_implementation():
         return eval_metrics_topicspecific_all
 
 
-    def _evaluate_vector_search(self, rrf_sim_result_df, evidence_review_id, search_strat_id, search_type): 
+    def _evaluate_vector_search(self, rrf_sim_result_df, evidence_review_id, search_strat_id, search_type, vectorsearch_type): 
         '''
-        Evaluates RRF combined results on evaluation set 
+        Evaluates RRF combined results on evaluation set on a given serach strategy id 
         '''
 
         self.logger.info(f'Retrieving evaluation set for evidence review id {evidence_review_id}')
@@ -280,11 +300,21 @@ class vector_search_implementation():
             ), {'search_strat_id': search_strat_id}).scalar()
 
         self.logger.info(f'Retrieving query goldset for evidence review id: {evidence_review_id}')
-        query_goldset_df = self.sql_procedures.retrieve_query_goldset(evidence_review_id = evidence_review_id)
         eval_cls = search_evaluation(database = database_name, search_type = search_type, vector_search = True, logger = self.logger)
 
         self.logger.info(f'Running vector search evaluation pipeline')
-        eval_metrics_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_goldset = query_goldset_df, database_name = database_name)
+        search_strat_df = pd.read_sql(f"SELECT * FROM search_strategies WHERE search_strategy_id = {search_strat_id}", self.engine)
+        
+
+        #retrieve query vector ids  
+        if vectorsearch_type == 'one-shot' or vectorsearch_type == 'few-shot': 
+            idcol = 'ground_truth_article_id'
+            query_vector_df = self.sql_procedures.retrieve_query_vector_ids(search_strat_id = search_strat_id, evidence_review_id = evidence_review_id, idcol = idcol)
+        else: 
+
+            query_vector_df = pd.DataFrame({'ground_truth_article_id': []})
+
+        eval_metrics_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df)
         self.logger.info(f'Vector search evaluation pipeline complete')
         return eval_metrics_df
     
@@ -298,6 +328,10 @@ class vector_search_implementation():
             'query_goldset_embeddings': {
                 'df': self.sql_procedures.retrieve_query_goldset(evidence_review_id='overall'),
                 'desc': 'goldset'
+            },
+            'query_evidencereview_topic_embeddings': {
+                'df': self.sql_procedures.retrieve_query_evidencereview_topics(evidence_review_id='overall'),
+                'desc': 'evidence review topic'
             },
             'searchspace_database_pubmed_embeddings': {
                 'df': self.sql_procedures.retrieve_search_result_articles_databaseview(database_id='1'),
@@ -361,48 +395,45 @@ class vector_search_implementation():
 
     def generate_embeddings_if_needed(self):
         """Generate embeddings only for tables that need it"""
+
         
         tables_to_regenerate, stats = self._check_embeddings_exist()
-        
         if not tables_to_regenerate:
             self.logger.info("All embedding tables are valid - no regeneration needed")
             return
         
         self.logger.info(f"Need to regenerate embeddings for: {tables_to_regenerate}")
         
+
         # Generate specific embeddings as needed
         if 'query_goldset_embeddings' in tables_to_regenerate:
+            self.sql_procedures.setup_embeddings_table(materialized_view_name = 'query_goldset_view', embedding_table_name = 'query_goldset_embeddings', linking_table_name = 'ground_truth_articles', linking_id = 'ground_truth_article_id', id_dtype = 'INT')
             self.generate_goldset_embeddings()
             
         if any('searchspace_database' in table for table in tables_to_regenerate):
             for table in tables_to_regenerate: 
+                for database in [1, 2, 3, 4]: 
+                    self.sql_procedures.setup_searchspace_database_embedding_table(database_id = database)
                 database_name = table.split('_')[2]
                 database_id = pd.read_sql(f"SELECT database_id FROM databases WHERE database_name = '{database_name}'", self.engine).iloc[0,0]
                 self.generate_searchspace_embeddings(database_id)
 
+        if 'query_evidencereview_topic_embeddings' in tables_to_regenerate: 
+            #set up embeddings tables for evidence review topics (to enable zero shot)
+            self.sql_procedures.setup_embeddings_table(materialized_view_name = 'query_evidencereview_topic_view', embedding_table_name = 'query_evidencereview_topic_embeddings', linking_table_name = 'evidence_reviews', linking_id = 'evidence_review_id', id_dtype = 'VARCHAR(50)')
+            self.generate_evidencereview_topic_embeddings()
 
-    def run_vector_search(self, search_type):
-        #run check if embeddings already exist
-        self.sql_procedures.create_querygoldset_view()
-        self.sql_procedures.setup_embeddings_table(materialized_view_name = 'query_goldset_view', embedding_table_name = 'query_goldset_embeddings', linking_id = 'ground_truth_article_id', id_dtype = 'INT')
-        
-        for database in [1, 2, 3, 4]: 
-            self.sql_procedures.setup_searchspace_database_embedding_table(database_id = database)
-        
-        self.logger.info('Generating embeddings if needed')
-        self.generate_embeddings_if_needed()
+
+    def run_vector_search(self, search_type, vector_search_type):
 
         if search_type == 'overarching': 
-            eval_metrics_df = self.overarching_vector_search_with_rrf()
+            eval_metrics_df = self.overarching_vector_search_with_rrf(vector_search_type)
+            return eval_metrics_df
         elif search_type == 'topic-specific': 
-            eval_metrics_df = self.topic_specific_vector_search_with_rrf()
+            eval_metrics_df = self.topic_specific_vector_search_with_rrf(vector_search_type)
+            return eval_metrics_df
 
-        return eval_metrics_df
-    
-if __name__ == '__main__': 
-    logger = LoggerConfig.setup_logger(logger_name = 'vector_search')
-    vector_search_cls = vector_search_implementation(logger = logger)
-    eval_metrics_df = vector_search_cls.run_vector_search(search_type = 'overarching')
+
 
     
 
