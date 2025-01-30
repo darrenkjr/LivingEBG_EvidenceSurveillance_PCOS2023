@@ -12,7 +12,22 @@ class sql_procedures:
 
     def __init__(self, logger = None, engine = None): 
         self.logger = logger
-        self.engine = engine
+        if engine is None: 
+            wsl_flag = os.environ.get('WSL_DISTRO_NAME') is not None
+    
+            if wsl_flag: 
+                os.environ['PGHOST'] = '/var/run/postgresql' 
+            else: 
+                os.environ['PGHOST'] = 'localhost' 
+            load_dotenv()
+            db_name = os.getenv('DB_NAME')
+            db_user = os.getenv('DB_USER')
+            db_pwd = os.getenv('DB_PWD')
+            db_host = os.getenv('DB_HOST')
+            db_port = os.getenv('DB_PORT')
+            self.engine = create_engine(f'postgresql://{db_user}:{db_pwd}@{db_host}:{db_port}/{db_name}')
+        else: 
+            self.engine = engine
         #register pgvector with sqlalchemy 
         #create extension vector if it doesnt exist 
         with self.engine.connect() as conn: 
@@ -113,7 +128,8 @@ class sql_procedures:
                 errors='coerce'
             ).astype('Int64')  
         ground_truth_df.reset_index(inplace = True)
-
+       
+        
         _srupdate_previous = ground_truth_df.query('sr_update == "Y" & title.notna() & abstract.notna() & year_pub_extract <= searchstrat_year_start').copy()
         _srupdate_goldset = _srupdate_previous.groupby('question_id').apply(
             lambda x: x.sample(
@@ -131,9 +147,26 @@ class sql_procedures:
                 random_state=42
             )
         ).reset_index(drop=True)
-
-        goldset_df = pd.concat([_srupdate_goldset, _newsr_goldset], ignore_index = True)
+        groundtruth_evidence_review_ids = ground_truth_df['question_id'].unique()
+        _goldset_evidence_review_ids = pd.concat([_srupdate_goldset, _newsr_goldset])['question_id'].unique()
+        missing_ids = list(set(groundtruth_evidence_review_ids) - set(_goldset_evidence_review_ids))
+        self.logger.info(f'Missing evidence review ids from goldset detected: {missing_ids}, attempt to fix, ie: treating as new sr')
+        _missing_ids_df = ground_truth_df.query('question_id in @missing_ids').copy()
+        _missing_ids_df = _missing_ids_df.groupby('question_id').apply(
+            lambda x: x.sample(
+                n=min(3, len(x)),  # x is already filtered for non-empty title/abstract
+                replace=False,
+                random_state=42
+            )
+        ).reset_index(drop=True)
+        
+        goldset_df = pd.concat([_srupdate_goldset, _newsr_goldset, _missing_ids_df], ignore_index = True)
+        goldset_evidence_review_ids = goldset_df['question_id'].unique()
+        assert set(goldset_evidence_review_ids) == set(groundtruth_evidence_review_ids), f'Goldset evidence review ids are not consistent with ground truth evidence review ids. Missing ids : {set(groundtruth_evidence_review_ids) - set(_goldset_evidence_review_ids)}'
+        
         goldset_ids = "'" + "','".join(map(str, goldset_df['included_article_id'])) + "'"
+
+     
 
 
         queries = [f"""
@@ -488,18 +521,13 @@ class sql_procedures:
             view of search results, with cosine similiarity socres and corresponding rank
         '''
 
-        # self.logger.info(f'Cleaning up previous vector search results if applicable')
-
-        # clean_up_query = f"""
-        #     DROP MATERIALIZED VIEW IF EXISTS vector_search_results_{searchstrat_id}_{evidence_review_id} CASCADE;
-        # """
+ 
 
         query_table_name, query_vector_id, goldset_query_filter, evidence_review_id = self._prepare_query_vector_queries(topic_specific_overall_flag, vector_search_type, evidence_review_id)
 
         vector_search_query = f""" 
 
         CREATE MATERIALIZED VIEW IF NOT EXISTS "vector_search_results_{searchstrat_id}_{evidence_review_id}" AS 
-        -- Retrieve query vectors, depending on the query table name, goldset query filter (which changes depending on the vector search type)
         WITH query_vectors AS (
             SELECT {query_vector_id}, embeddings 
             FROM {query_table_name} {goldset_query_filter}
@@ -589,7 +617,7 @@ class sql_procedures:
         Retrieves the query vector ids for a given search strategy id and evidence review id 
         '''
         query = f"""
-            SELECT {idcol} FROM vector_search_results_{search_strat_id}_{evidence_review_id}
+            SELECT {idcol} FROM "vector_search_results_{search_strat_id}_{evidence_review_id}"
         """
         with self.engine.begin() as conn:
             return pd.read_sql(query, conn)
@@ -610,13 +638,15 @@ class sql_procedures:
                 goldset_query_filter = f"""
                     JOIN (
                         SELECT DISTINCT ON (qgv.evidence_review_id) 
-                            qgv.{id}
+                            qgv.{id} as selected_article_id,
+                            qgv.evidence_review_id
                         FROM query_goldset_view qgv
                         ORDER BY 
                             qgv.evidence_review_id,
-                            MD5(qgv.ground_truth_article_id::text)
+                            MD5(qgv.{id}::text)
                         ) selected_goldset_articles 
                     ON {query_table_name}.{id} = selected_goldset_articles.selected_article_id
+                    WHERE selected_goldset_articles.evidence_review_id = '{evidence_review_id}'
                 """
                 
             elif vector_search_type == 'few-shot': 
@@ -689,8 +719,11 @@ class sql_procedures:
                 assert len(rrf_sim_df) == len(sra_df)
                 self.logger.info(f'rrf_sim_df and sra_df have the same number of rows, moving on to merging')
                 rrf_sim_df = rrf_sim_df.merge(sra_df, on='search_result_article_id', how='left', suffixes = ('_rrf', '_unranked'))
+        
         except AssertionError as e: 
+            self.logger.debug(f'Current search strat id: {searchstrat_id}, evidence review id: {evidence_review_id}, original search strat id: {original_searchstrat_id}')
             self.logger.error(f'The number of search result articles does not match the number of search result articles in the vector search results: {e}')
+            
             raise e 
         except Exception as e: 
             self.logger.error(f'Error retrieving search result articles for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}: {e}')

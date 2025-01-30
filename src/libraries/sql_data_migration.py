@@ -13,19 +13,19 @@ import psycopg2
 
 class sql_data_migration:
 
-    def __init__(self, db_name, db_user, db_pwd, db_host, db_port, logger = None):
+    def __init__(self, db_name, db_user, db_pwd, db_host, db_port, logger = None, engine = None):
 
             # Create a SQLAlchemy engine
-
         self.logger = logger
         self.db_name = db_name
         self.db_user = db_user
         self.db_pwd = db_pwd
         self.db_host = db_host
         self.db_port = db_port
-
-        self.engine  = self._create_database() 
-        
+        if engine is None: 
+            self.engine = self._create_database() 
+        else: 
+            self.engine = engine
         self.logger.info(f"Connecting to database {self.db_name}")
         with self.engine.connect() as conn:
                 #check connections 
@@ -83,6 +83,12 @@ class sql_data_migration:
         """Create database if it doesn't exist using pure SQLAlchemy"""
         try:
             # Connect to default postgres database
+            wsl_flag = os.environ.get('WSL_DISTRO_NAME') is not None
+    
+            if wsl_flag: 
+                os.environ['PGHOST'] = '/var/run/postgresql' 
+            else: 
+                os.environ['PGHOST'] = 'localhost' 
             default_engine = create_engine(
                 f'postgresql://{self.db_user}:{self.db_pwd}@{self.db_host}:{self.db_port}/postgres'
             )

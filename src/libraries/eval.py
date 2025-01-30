@@ -452,12 +452,13 @@ class search_evaluation:
                 similarity_threshold_cutoff= 0), pd.DataFrame()
 
         elif len(comparison_df) > 0: 
-            recall = len(matches) / len(comparison_df) #recall of the search (raw)
-            
+                        
             #dedupe results df, and make sure that it is sorted by ranking 
             raw_results_df_dedupe = raw_results_df.sort_values('combined_rank_rrf').copy()
             #evaluate matches 
             matches = self._evaluate_vs_matches(comparison_df, raw_results_df_dedupe, self.database)
+            recall = len(matches) / len(comparison_df) #recall of the search (raw)
+
             #non ranked metrics 
             nnr_raw = len(raw_results_df_dedupe) # total number of results to read before looking at ranking 
             self.logger.info(f'Total number of results to read before looking at ranking: {nnr_raw}')
@@ -479,11 +480,7 @@ class search_evaluation:
                 #find first match that isn't in the goldset (ie: a theoretically new match)
                 nnr_first = matches_filter_goldset['combined_rank_rrf'].min()
                 self.logger.info(f'Rank of first match not in goldset: {nnr_first}')
-                similarity_threshold_cutoff = matches_filter_goldset['cosine_similarity'].min()
-                self.logger.info(f'Similarity threshold cutoff: {similarity_threshold_cutoff}')
-                result_cutoff_df = raw_results_df_dedupe.query(f'cosine_similarity >= {similarity_threshold_cutoff}')
-                nnr_threshold = len(result_cutoff_df)
-                self.logger.info(f'Number of results to read after similarity threshold cutoff: {nnr_threshold}')
+             
             
                 recall_at_k_dct = {}
                 for k in [10, 100, 1000]: 
@@ -493,24 +490,34 @@ class search_evaluation:
                         matches_at_k = matches[matches['original_id'].isin(top_k_ids)].shape[0]
                         recall_at_k = matches_at_k / len(comparison_df)
                     self.logger.info(f'Recall at {k}: {recall_at_k}')
+
                     recall_at_k_dct[f'recall_at_{k}'] = recall_at_k
+
+                similarity_threshold_cutoff = matches_filter_goldset['cosine_similarity'].min()
+                self.logger.info(f'Similarity threshold cutoff: {similarity_threshold_cutoff}')
+
+                result_cutoff_df = raw_results_df_dedupe.query(f'cosine_similarity >= {similarity_threshold_cutoff}')
+                nnr_threshold = len(result_cutoff_df)
+                self.logger.info(f'Number of results to read after similarity threshold cutoff: {nnr_threshold}')
+                matched_cutoff = self._evaluate_vs_matches(comparison_df, result_cutoff_df, self.database)
+                recall_cutoff = len(matched_cutoff) / len(comparison_df)
+                assert recall_cutoff == recall 
+                 #check recall for the trimmed results 
+                recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
+
             elif len(matches) == 0: 
                 self.logger.warning(f'No matches found for current evidence_review_id. Returning 0 recall.')
-                nnr_first = 0
-                similarity_threshold_cutoff = 0
-                nnr_threshold = 0
-                recall_at_k_dct = {
-                    'recall_at_10': 0,
-                    'recall_at_100': 0,
-                    'recall_at_1000': 0
-                }
+                nnr_raw = 'N/A'
+                nnr_first = 'N/A'
+                similarity_threshold_cutoff = 'N/A'
+                nnr_threshold = 'N/A'
+                recall_at_10 = 'N/A'
+                recall_at_100 = 'N/A'
+                recall_at_1000 = 'N/A'
                 result_cutoff_df = pd.DataFrame()
+                
 
-            #check recall for the trimmed results 
-            matched_cutoff = self._evaluate_vs_matches(comparison_df, result_cutoff_df, self.database)
-            recall_cutoff = len(matched_cutoff) / len(comparison_df)
-            assert recall_cutoff == recall 
-            recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
+           
 
             return vectorsearch_eval_metrics(nnr_raw= nnr_raw, nnr_first= nnr_first, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff), result_cutoff_df
         

@@ -7,11 +7,12 @@ if str(src_path) not in sys.path:
 from libraries.vector_search import vector_search_implementation
 from libraries.sql_data_migration import sql_data_migration
 from libraries.logging_config import LoggerConfig
+from libraries.sql_procedures import sql_procedures
 import os 
 import dotenv
 import pandas as pd 
 dotenv.load_dotenv()
-import platform
+from sqlalchemy import create_engine
 from pandas import ExcelWriter
 from openpyxl import load_workbook
 def main(): 
@@ -29,6 +30,7 @@ def main():
 
     logger.info('Setting up environment variables for postgresql connection')
     wsl_flag = os.environ.get('WSL_DISTRO_NAME') is not None
+
     if wsl_flag: 
         os.environ['PGHOST'] = '/var/run/postgresql' 
     else: 
@@ -39,14 +41,15 @@ def main():
     db_pwd = os.getenv('DB_PWD')
     db_host = os.getenv('DB_HOST')
     db_port = os.getenv('DB_PORT')
+    engine = create_engine(f'postgresql://{db_user}:{db_pwd}@{db_host}:{db_port}/{db_name}')
 
     #perform data migration checks 
 
 
     logger.info(f'Performing data migration checks')
-    sql_instance = sql_data_migration(db_name, db_user, db_pwd, db_host, db_port, logger)
+    sql_instance = sql_data_migration(db_name, db_user, db_pwd, db_host, db_port, logger, engine)
     if not sql_instance.check_data_migration(): 
-        logger.info(f'Data migration checks failed, regenerating all tables')
+        logger.warning(f'Data migration checks failed, regenerating all tables')
         sql_instance.drop_all_tables_data()
         logger.info(f'Creating all tables')
         sql_instance._create_tables()
@@ -68,11 +71,11 @@ def main():
 
         
     logger.info('Initializing vector search')
-    vector_search_cls = vector_search_implementation(logger = logger)
-    vector_search_cls.sql_procedures.create_querygoldset_view()
-    vector_search_cls.sql_procedures.create_evaluation_set_view_2017included()
-    vector_search_cls.sql_procedures.create_query_evidencereview_topic_view()
-       #run check if embeddings already exist
+    sql_procedures_cls = sql_procedures(logger = logger, engine = engine)
+    sql_procedures_cls.create_querygoldset_view()
+    sql_procedures_cls.create_evaluation_set_view_2017included()
+    sql_procedures_cls.create_query_evidencereview_topic_view()
+    vector_search_cls = vector_search_implementation(logger = logger, engine = engine)
     vector_search_cls.generate_embeddings_if_needed()
 
     for search_type in ['topic-specific']: 
@@ -80,7 +83,7 @@ def main():
         eval_metrics_df = pd.DataFrame()
 
 
-        for vector_search_type in ['zero-shot', 'one-shot', 'few-shot']: 
+        for vector_search_type in ['one-shot', 'few-shot', 'zero_shot']: 
             _metrics_df = vector_search_cls.run_vector_search(search_type, vector_search_type)
             eval_results_path = Path(__file__).parent / 'evaluation_results' / 'overall' 
             eval_results_path.mkdir(parents=True, exist_ok=True) 
