@@ -6,6 +6,8 @@ import dotenv
 dotenv.load_dotenv()
 import os
 from pathlib import Path
+from pandas import ExcelWriter
+from openpyxl import load_workbook
 
 def main():
     total_evalmetrics_df = pd.DataFrame()
@@ -19,13 +21,39 @@ def main():
         total_evalmetrics_df = pd.concat([total_evalmetrics_df, evalmetrics_df], ignore_index=True)
 
 
-    include_header = True
-    total_evalmetrics_df.to_csv(
-        eval_results_path / 'overall_evalmetrics_df.csv',  # path is the first positional argument
-        mode='a',  # append mode
-        header=not (eval_results_path / 'overall_evalmetrics_df.csv').exists() if include_header else False,
-        index=False
-    )
+    sheet_name = 'topic_specific_no_vs'
+    excel_path = eval_results_path / 'overall_evalmetrics_df.xlsx'
+    if excel_path.exists():
+        # Load existing workbook
+        book = load_workbook(excel_path)
+        
+        with ExcelWriter(excel_path, mode='a', engine='openpyxl') as writer:
+            if sheet_name in book.sheetnames:
+                # Get the last row in existing sheet
+                sheet = book[sheet_name]
+                start_row = sheet.max_row
+                
+                total_evalmetrics_df.to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    startrow=start_row,  # Start after last row
+                    index=False,
+                    header=False  # Don't write headers again
+                )
+            else:
+                # New sheet, include headers
+                total_evalmetrics_df.to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    index=False
+                )
+    else:
+        # New file
+        total_evalmetrics_df.to_excel(
+            excel_path,
+            sheet_name=sheet_name,
+            index=False
+        )
 
 
 if __name__ == '__main__': 

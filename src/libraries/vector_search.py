@@ -210,57 +210,55 @@ class vector_search_implementation():
     def topic_specific_vector_search_with_rrf(self, vector_search_type:str): 
 
         """
-        Retrieves overarching search strats and converts this to topic specific search strats using vector search 
+        Retrieves historic non vector search overarching search strats and converts this to topic specific search strats using vector search 
         """
         #retrieve unique evidence review ids and construct search strat df to input into serach strat table 
         evidence_review_id_list = self.sql_procedures.retrieve_evidence_review_ids(search_type = 'topic-specific')
-        overarching_searchstrat_df = self.sql_procedures.retrieve_searchstrat(search_type = 'ovearching')
+        evidence_review_id_df = pd.DataFrame({'evidence_review_id': evidence_review_id_list})
+        overarching_searchstrat_df = self.sql_procedures.retrieve_searchstrat(search_type = 'overarching')
+    
+        _df = overarching_searchstrat_df.copy()
+        _df['vector_search'] = vector_search_type
+        _df['search_strategy_type_id'] = 3
 
-        base_df = pd.DataFrame({
-            'evidence_review_id': evidence_review_id_list,
-            'search_type_id': 2,
-            'search_strategy_type_id': 3,
-            'vector_search': vector_search_type,
-            'searchstrat_year_start': 1990,
-            'searchstrat_year_end': 2022,
-            'searchdetail_file_path': 'placeholder'
-        })
-        
-        database_df = pd.DataFrame({'database_id': [1, 2, 3, 4]})
-        
-        #create dict mapping database id to overarching search strat id 
-        database_to_overarching_strat_map = {row['database_id']: row['search_strategy_id'] for _, row in overarching_searchstrat_df.iterrows()}
-        
-        input_searchstrat_df = (
-            base_df
-            .assign(key=1)
-            .merge(database_df.assign(key=1), on='key')
-            .drop('key', axis=1)
-            .reset_index()
-            .rename(columns={'index': 'search_strategy_id'})
-            .assign(search_strategy_id=lambda x: x['search_strategy_id'] + 1)
-            .assign(original_search_strategy_id=lambda x: x['database_id'].apply(lambda y: database_to_overarching_strat_map[y]))
-        )
-        assert len(input_searchstrat_df) == len(evidence_review_id_list) * len(database_df), "The number of rows in input_df should be equal to the number of evidence review IDs times 4."
+        #we need original search strat id in order to join with the search result article table 
+        _df['original_search_strategy_id'] = _df['search_strategy_id']
 
 
-        topic_specific_vs_searchstrat_df = self.sql_procedures.create_new_searchstrat_vectorsearch(input_searchstrat_df, vector_search_type).drop(columns = ['original_search_strategy_id']).copy()
+        #overarching to topic specific search start conversion 
+        search_type_id = 2
+        _df['search_type_id'] = search_type_id
 
+
+        #create cartesian product of evidence review id and search strat df 
+        _df.drop(columns = ['evidence_review_id'], inplace = True)
+        temp_df = pd.merge(_df, evidence_review_id_df, how = 'cross')
+        temp_df['search_strategy_id'] = temp_df.index + 1
+
+        topic_specific_vs_searchstrat_df = self.sql_procedures.create_new_searchstrat_vectorsearch(temp_df, vector_search_type = vector_search_type, search_type_id = search_type_id)
         eval_metrics_df_list = []
-
-        result_cutoff_df_dct = {
-            'database_id': [],
-            'search_strategy_id': [],
-            'evidence_review_id': [],
-            'result_cutoff_df': []
-        }
-
         for database_id, original_searchstrat_id, searchstrat_id, evidence_review_id in zip(topic_specific_vs_searchstrat_df['database_id'], topic_specific_vs_searchstrat_df['original_search_strategy_id'] ,topic_specific_vs_searchstrat_df['search_strategy_id'], topic_specific_vs_searchstrat_df['evidence_review_id']): 
-            self.sql_procedures.run_vector_search(original_searchstrat_id = original_searchstrat_id, searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id)
+            
+            self.sql_procedures.run_vector_search(
+                original_searchstrat_id = original_searchstrat_id, 
+                searchstrat_id = searchstrat_id, 
+                evidence_review_id = evidence_review_id, 
+                topic_specific_overall_flag = True, 
+                vector_search_type = vector_search_type)
+            
             #ranked results output 
-            rrf_sim_result_df = self.sql_procedures.rrf_combine_results(searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id)
+            rrf_sim_result_df = self.sql_procedures.rrf_combine_results(
+                searchstrat_id = searchstrat_id, 
+                evidence_review_id = evidence_review_id,
+                original_searchstrat_id = original_searchstrat_id, 
+                )
             #conduct evaluation 
-            eval_metrics_df, result_cutoff_df = self._evaluate_vector_search(rrf_sim_result_df, evidence_review_id = evidence_review_id, search_strat_id = searchstrat_id,  search_type = 'topic-specific')
+            eval_metrics_df, result_cutoff_df = self._evaluate_vector_search(
+                rrf_sim_result_df, 
+                evidence_review_id = evidence_review_id, 
+                search_strat_id = searchstrat_id,  
+                search_type = 'topic-specific', 
+                vectorsearch_type = vector_search_type)
             eval_metrics_df_list.append(eval_metrics_df)
 
             ### commented out - code to evaluate overall workflow 
@@ -281,7 +279,7 @@ class vector_search_implementation():
         return eval_metrics_topicspecific_all
 
 
-    def _evaluate_vector_search(self, rrf_sim_result_df, evidence_review_id, search_strat_id, search_type, vectorsearch_type): 
+    def _evaluate_vector_search(self, rrf_sim_result_df : pd.DataFrame, evidence_review_id : str, search_strat_id : int, search_type : str, vectorsearch_type : str): 
         '''
         Evaluates RRF combined results on evaluation set on a given serach strategy id 
         '''
@@ -311,12 +309,11 @@ class vector_search_implementation():
             idcol = 'ground_truth_article_id'
             query_vector_df = self.sql_procedures.retrieve_query_vector_ids(search_strat_id = search_strat_id, evidence_review_id = evidence_review_id, idcol = idcol)
         else: 
-
             query_vector_df = pd.DataFrame({'ground_truth_article_id': []})
 
-        eval_metrics_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df)
+        eval_metrics_df, cutoff_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df)
         self.logger.info(f'Vector search evaluation pipeline complete')
-        return eval_metrics_df
+        return eval_metrics_df, cutoff_df
     
     def _check_embeddings_exist(self): 
         """Check embedding tables and determine which need regeneration"""

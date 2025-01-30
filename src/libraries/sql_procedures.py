@@ -663,7 +663,7 @@ class sql_procedures:
         '''
 
         query = f"""
-            SELECT * FROM vector_search_results_{searchstrat_id}_{evidence_review_id}
+            SELECT * FROM "vector_search_results_{searchstrat_id}_{evidence_review_id}"
         """
         self.logger.info(f'Retrieving vector search results for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
         with self.engine.begin() as conn: 
@@ -695,12 +695,10 @@ class sql_procedures:
         except Exception as e: 
             self.logger.error(f'Error retrieving search result articles for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}: {e}')
             raise e 
-        
-        
-                
+    
         return rrf_sim_df
     
-    def retrieve_evaluation_set(self, evidence_review_id): 
+    def retrieve_evaluation_set(self, evidence_review_id : str): 
         '''
         Retrieves the evaluation set for a given evidence review id 
         '''
@@ -710,7 +708,7 @@ class sql_procedures:
             """
         else: 
             query = f"""
-                SELECT * FROM groundtruth_eval_set_2017new WHERE evidence_review_id = {evidence_review_id}
+                SELECT * FROM groundtruth_eval_set_2017new WHERE evidence_review_id = '{evidence_review_id}'
             """
 
         with self.engine.begin() as conn: 
@@ -762,7 +760,7 @@ class sql_procedures:
             SELECT DISTINCT evidence_review_id 
                 FROM search_strategies
                 JOIN search_types ON search_strategies.search_type_id = search_types.search_type_id
-                WHERE search_types.name = {search_type}
+                WHERE search_types.name = '{search_type}'
         """
         with self.engine.begin() as conn: 
             evidence_review_ids = pd.read_sql(query, conn)['evidence_review_id'].tolist()

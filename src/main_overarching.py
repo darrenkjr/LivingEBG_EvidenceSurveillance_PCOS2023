@@ -2,13 +2,14 @@ from embmedline_ris_pipeline import embmedline_ris_pipeline
 from openalex_overarching_search import oa_overarching_search
 from openalex_keywordsearch import oa_keywordsearch_dev
 from pubmed_overarching_search import pubmed_overarching_search
+from openpyxl import load_workbook
 import asyncio
 import pandas as pd
 import dotenv
 dotenv.load_dotenv()
 import os
 from pathlib import Path
-
+from pandas import ExcelWriter
 
 
 def main(): 
@@ -40,14 +41,39 @@ def main():
         evalmetrics_df = embmedline_ris_pipeline_cls.ris_eval_pipeline()
         total_evalmetrics_df = pd.concat([total_evalmetrics_df, evalmetrics_df], ignore_index=True)
 
-    include_header = True
-    total_evalmetrics_df.to_csv(
-        eval_results_path / 'overall_evalmetrics_df.csv',  # path is the first positional argument
-        mode='a',  # append mode
-        header=not (eval_results_path / 'overall_evalmetrics_df.csv').exists() if include_header else False,
-        index=False
-    )
-
+    sheet_name = 'ovearching_no_vs'
+    excel_path = eval_results_path / 'overall_evalmetrics_df.xlsx'
+    if excel_path.exists():
+        # Load existing workbook
+        book = load_workbook(excel_path)
+        
+        with ExcelWriter(excel_path, mode='a', engine='openpyxl') as writer:
+            if sheet_name in book.sheetnames:
+                # Get the last row in existing sheet
+                sheet = book[sheet_name]
+                start_row = sheet.max_row
+                
+                total_evalmetrics_df.to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    startrow=start_row,  # Start after last row
+                    index=False,
+                    header=False  # Don't write headers again
+                )
+            else:
+                # New sheet, include headers
+                total_evalmetrics_df.to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    index=False
+                )
+    else:
+        # New file
+        total_evalmetrics_df.to_excel(
+            excel_path,
+            sheet_name=sheet_name,
+            index=False
+        )
 
 if __name__ == '__main__': 
     main()

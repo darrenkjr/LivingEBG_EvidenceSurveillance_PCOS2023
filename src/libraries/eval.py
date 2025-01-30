@@ -441,55 +441,79 @@ class search_evaluation:
             vectorsearch_eval_metrics: dataclass with vector search metrics
         '''
 
-        #dedupe results df, and make sure that it is sorted by ranking 
-        raw_results_df_dedupe = raw_results_df.sort_values('combined_rank_rrf').copy()
-        #evaluate matches 
-        matches = self._evaluate_vs_matches(comparison_df, raw_results_df_dedupe, self.database)
-        #non ranked metrics 
-        nnr_raw = len(raw_results_df_dedupe) # total number of results to read before looking at ranking 
-        self.logger.info(f'Total number of results to read before looking at ranking: {nnr_raw}')
-        n_retrieved = len(matches) #total number of sucessful matches / results retrived 
-        self.logger.info(f'Total number of sucessful matches / results retrived: {n_retrieved}')
-        n_missed = len(comparison_df) - len(matches) #total number of missed results 
-        self.logger.info(f'Total number of missed results: {n_missed}')
-        recall = len(matches) / len(comparison_df) #recall of the search (raw)
-        self.logger.info(f'Recall of the search (raw): {recall}')
-        precision = len(matches) / len(raw_results_df_dedupe) #precision of the search (raw)=
-        self.logger.info(f'Precision of the search (raw): {precision}')
-        f1 = self._calc_fscore(precision, recall, 1)
-        f2 = self._calc_fscore(precision, recall, 2)
-        f3 = self._calc_fscore(precision, recall, 3)
+        if len(comparison_df) == 0: 
+            self.logger.warning(f'No comparison / evalutation set found for current evidence_review_id. Verify this is intended. Returning empty results.')
+            return vectorsearch_eval_metrics(
+                nnr_raw= 0, nnr_first= 0, nnr_threshold= 0, 
+                n_retrieved= 0, n_missed= 0, 
+                recall= 0, precision= 0, 
+                f1_score= 0, f2_score= 0, f3_score= 0, 
+                recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, 
+                similarity_threshold_cutoff= 0), pd.DataFrame()
 
-        matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_vector_df['ground_truth_article_id'])]
-        #ranked metrics 
-        if len(matches) > 0: 
-            matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_vector_df['ground_truth_article_id'])]
-            #find first match that isn't in the goldset (ie: a theoretically new match)
-            nnr_first = matches_filter_goldset['combined_rank_rrf'].min()
-            self.logger.info(f'Rank of first match not in goldset: {nnr_first}')
-            similarity_threshold_cutoff = matches_filter_goldset['cosine_similarity'].min()
-            self.logger.info(f'Similarity threshold cutoff: {similarity_threshold_cutoff}')
-            result_cutoff_df = raw_results_df_dedupe.query(f'cosine_similarity >= {similarity_threshold_cutoff}')
-            nnr_threshold = len(result_cutoff_df)
-            self.logger.info(f'Number of results to read after similarity threshold cutoff: {nnr_threshold}')
+        elif len(comparison_df) > 0: 
+            recall = len(matches) / len(comparison_df) #recall of the search (raw)
+            
+            #dedupe results df, and make sure that it is sorted by ranking 
+            raw_results_df_dedupe = raw_results_df.sort_values('combined_rank_rrf').copy()
+            #evaluate matches 
+            matches = self._evaluate_vs_matches(comparison_df, raw_results_df_dedupe, self.database)
+            #non ranked metrics 
+            nnr_raw = len(raw_results_df_dedupe) # total number of results to read before looking at ranking 
+            self.logger.info(f'Total number of results to read before looking at ranking: {nnr_raw}')
+            n_retrieved = len(matches) #total number of sucessful matches / results retrived 
+            self.logger.info(f'Total number of sucessful matches / results retrived: {n_retrieved}')
+            n_missed = len(comparison_df) - len(matches) #total number of missed results 
+            self.logger.info(f'Total number of missed results: {n_missed}')
+            self.logger.info(f'Recall of the search (raw): {recall}')
+            precision = len(matches) / len(raw_results_df_dedupe) #precision of the search (raw)
         
-            recall_at_k_dct = {}
-            for k in [10, 100, 1000]: 
-                top_k_ids = raw_results_df_dedupe.head(k)['original_id']
-                # Count matches in top k (including duplicates)
-                matches_at_k = matches[matches['original_id'].isin(top_k_ids)].shape[0]
-                recall_at_k = matches_at_k / len(comparison_df)
-                self.logger.info(f'Recall at {k}: {recall_at_k}')
-                recall_at_k_dct[f'recall_at_{k}'] = recall_at_k
+            self.logger.info(f'Precision of the search (raw): {precision}')
+            f1 = self._calc_fscore(precision, recall, 1)
+            f2 = self._calc_fscore(precision, recall, 2)
+            f3 = self._calc_fscore(precision, recall, 3)
+            matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_vector_df['ground_truth_article_id'])]
+            #ranked metrics 
+            if len(matches) > 0: 
+                matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_vector_df['ground_truth_article_id'])]
+                #find first match that isn't in the goldset (ie: a theoretically new match)
+                nnr_first = matches_filter_goldset['combined_rank_rrf'].min()
+                self.logger.info(f'Rank of first match not in goldset: {nnr_first}')
+                similarity_threshold_cutoff = matches_filter_goldset['cosine_similarity'].min()
+                self.logger.info(f'Similarity threshold cutoff: {similarity_threshold_cutoff}')
+                result_cutoff_df = raw_results_df_dedupe.query(f'cosine_similarity >= {similarity_threshold_cutoff}')
+                nnr_threshold = len(result_cutoff_df)
+                self.logger.info(f'Number of results to read after similarity threshold cutoff: {nnr_threshold}')
+            
+                recall_at_k_dct = {}
+                for k in [10, 100, 1000]: 
+                    if len(matches) > 0: 
+                        top_k_ids = raw_results_df_dedupe.head(k)['original_id']
+                        # Count matches in top k (including duplicates)
+                        matches_at_k = matches[matches['original_id'].isin(top_k_ids)].shape[0]
+                        recall_at_k = matches_at_k / len(comparison_df)
+                    self.logger.info(f'Recall at {k}: {recall_at_k}')
+                    recall_at_k_dct[f'recall_at_{k}'] = recall_at_k
+            elif len(matches) == 0: 
+                self.logger.warning(f'No matches found for current evidence_review_id. Returning 0 recall.')
+                nnr_first = 0
+                similarity_threshold_cutoff = 0
+                nnr_threshold = 0
+                recall_at_k_dct = {
+                    'recall_at_10': 0,
+                    'recall_at_100': 0,
+                    'recall_at_1000': 0
+                }
+                result_cutoff_df = pd.DataFrame()
 
-        #check recall for the trimmed results 
-        matched_cutoff = self._evaluate_vs_matches(comparison_df, result_cutoff_df, self.database)
-        recall_cutoff = len(matched_cutoff) / len(comparison_df)
-        assert recall_cutoff == recall 
-        recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
+            #check recall for the trimmed results 
+            matched_cutoff = self._evaluate_vs_matches(comparison_df, result_cutoff_df, self.database)
+            recall_cutoff = len(matched_cutoff) / len(comparison_df)
+            assert recall_cutoff == recall 
+            recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
 
-        return vectorsearch_eval_metrics(nnr_raw= nnr_raw, nnr_first= nnr_first, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff), result_cutoff_df
-    
+            return vectorsearch_eval_metrics(nnr_raw= nnr_raw, nnr_first= nnr_first, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff), result_cutoff_df
+        
     
     def _calc_fscore(self, precision: float, recall: float, beta: float = 1) -> float: 
         try: 
@@ -542,20 +566,22 @@ class search_evaluation:
             return self.process_search_results(result_df)
 
     def run_vectorsearch_eval_pipeline(self, result_set: pd.DataFrame, evaluation_set: pd.DataFrame, query_vector_df: pd.DataFrame, database_name: str, search_strat_df : pd.DataFrame): 
-
-        vector_search_metrics, result_cutoff_df = self.calc_vectorsearch_metrics(comparison_df = evaluation_set, raw_results_df = result_set, query_vector_df = query_vector_df)
-        vector_search_metrics_df = pd.DataFrame.from_records([asdict(vector_search_metrics)])
-        
-        
-        #add metadata 
-        vector_search_metrics_df['database'] = database_name
-        vector_search_metrics_df['search_type'] = search_strat_df['search_type_id']
-        vector_search_metrics_df['search_strategy'] = search_strat_df['search_strategy_type_id']
-        vector_search_metrics_df['vector_search_type'] = search_strat_df['vector_search']
-        vector_search_metrics_df['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M')
-        vector_search_metrics_df['search_strategy_id'] = search_strat_df['search_strategy_id']
-        vector_search_metrics_df['evidence_review_id'] = search_strat_df['evidence_review_id']
-        return vector_search_metrics_df, result_cutoff_df
+        if len(evaluation_set) == 0: 
+            self.logger.warning(f'No evaluation set found for current evidence_review_id. REturning empty results. Potential cause is due to no new articles included for current evidence_review_id. Verify this is intended.')
+            return pd.DataFrame(), pd.DataFrame()
+        elif len(evaluation_set) > 0: 
+            vector_search_metrics, result_cutoff_df = self.calc_vectorsearch_metrics(comparison_df = evaluation_set, raw_results_df = result_set, query_vector_df = query_vector_df)
+            vector_search_metrics_df = pd.DataFrame.from_records([asdict(vector_search_metrics)])
+            
+            #add metadata 
+            vector_search_metrics_df['database'] = database_name
+            vector_search_metrics_df['search_type'] = search_strat_df['search_type_id']
+            vector_search_metrics_df['search_strategy'] = search_strat_df['search_strategy_type_id']
+            vector_search_metrics_df['vector_search_type'] = search_strat_df['vector_search']
+            vector_search_metrics_df['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+            vector_search_metrics_df['search_strategy_id'] = search_strat_df['search_strategy_id']
+            vector_search_metrics_df['evidence_review_id'] = search_strat_df['evidence_review_id']
+            return vector_search_metrics_df, result_cutoff_df
 
 
 
