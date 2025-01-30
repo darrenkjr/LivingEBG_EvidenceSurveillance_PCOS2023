@@ -612,7 +612,7 @@ class sql_procedures:
             self.logger.error(f'Error running vector search for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}: {e}')
             raise e 
     
-    def retrieve_query_vector_ids(self, search_strat_id, evidence_review_id, idcol): 
+    def retrieve_query_vector_ids(self, search_strat_id, evidence_review_id, idcol) -> pd.DataFrame: 
         '''
         Retrieves the query vector ids for a given search strategy id and evidence review id 
         '''
@@ -652,7 +652,18 @@ class sql_procedures:
             elif vector_search_type == 'few-shot': 
                 query_table_name = 'query_goldset_embeddings'
                 id = 'ground_truth_article_id'
-                goldset_query_filter = f"WHERE evidence_review_id = '{evidence_review_id}'"
+                goldset_query_filter = f"""
+                    JOIN (
+                        SELECT  
+                            qgv.{id} as selected_article_id,
+                            qgv.evidence_review_id
+                        FROM query_goldset_view qgv
+                        ORDER BY 
+                            qgv.evidence_review_id
+                        ) selected_goldset_articles 
+                    ON {query_table_name}.{id} = selected_goldset_articles.selected_article_id
+                    WHERE selected_goldset_articles.evidence_review_id = '{evidence_review_id}'
+                """
 
         else:  #overarching case 
             evidence_review_id = 'overall'
@@ -698,38 +709,52 @@ class sql_procedures:
         self.logger.info(f'Retrieving vector search results for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
         with self.engine.begin() as conn: 
             sim_df = pd.read_sql(query, conn)
+            
         
         #calculate rrf score 
-        self.logger.info(f'Calculating RRF scores')
-        sim_df['rrf_score'] = 1 / (60 + sim_df['rank'])
-        rrf_sim_df = sim_df.groupby('search_result_article_id').agg({
-            'rrf_score': 'sum', #sum of rrf scores across all input query vectors
-            'cosine_similarity': 'mean', #averge cosine similiarity across all input query vectors
-            'search_strategy_id': 'first' #search strategy id of the input query vector
-            }).reset_index().copy()
+        if not sim_df.empty: 
+            self.logger.info(f'Calculating RRF scores')
+            sim_df['rrf_score'] = 1 / (60 + sim_df['rank'])
+            rrf_sim_df = sim_df.groupby('search_result_article_id').agg({
+                'rrf_score': 'sum', #sum of rrf scores across all input query vectors
+                'cosine_similarity': 'mean', #averge cosine similiarity across all input query vectors
+                'search_strategy_id': 'first' #search strategy id of the input query vector
+                }).reset_index().copy()
 
-        rrf_sim_df['combined_rank_rrf'] = rrf_sim_df['rrf_score'].rank(method = 'first', ascending = False) 
-        #note - if there is a tie, this will get sequential ranks 
-        rrf_sim_df = rrf_sim_df.sort_values(by = ['rrf_score'], ascending = False)
+            rrf_sim_df['combined_rank_rrf'] = rrf_sim_df['rrf_score'].rank(method = 'first', ascending = False) 
+            #note - if there is a tie, this will get sequential ranks 
+            rrf_sim_df = rrf_sim_df.sort_values(by = ['rrf_score'], ascending = False)
 
-        #retrieve corresponding serach result articles based on search_strat_id (original)
-        sra_df = pd.read_sql(f"SELECT * FROM search_result_articles WHERE search_strategy_id = {original_searchstrat_id}", self.engine)
-        try: 
-            with self.engine.begin() as conn: 
-                assert len(rrf_sim_df) == len(sra_df)
-                self.logger.info(f'rrf_sim_df and sra_df have the same number of rows, moving on to merging')
-                rrf_sim_df = rrf_sim_df.merge(sra_df, on='search_result_article_id', how='left', suffixes = ('_rrf', '_unranked'))
-        
-        except AssertionError as e: 
-            self.logger.debug(f'Current search strat id: {searchstrat_id}, evidence review id: {evidence_review_id}, original search strat id: {original_searchstrat_id}')
-            self.logger.error(f'The number of search result articles does not match the number of search result articles in the vector search results: {e}')
+            #retrieve corresponding serach result articles based on search_strat_id (original)
+            sra_df = pd.read_sql(f"SELECT * FROM search_result_articles WHERE search_strategy_id = {original_searchstrat_id}", self.engine)
+            try: 
+                with self.engine.begin() as conn: 
+                    assert len(rrf_sim_df) == len(sra_df)
+                    self.logger.info(f'rrf_sim_df and sra_df have the same number of rows, moving on to merging')
+                    rrf_sim_df = rrf_sim_df.merge(sra_df, on='search_result_article_id', how='left', suffixes = ('_rrf', '_unranked'))
             
-            raise e 
-        except Exception as e: 
-            self.logger.error(f'Error retrieving search result articles for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}: {e}')
-            raise e 
-    
-        return rrf_sim_df
+            except AssertionError as e: 
+                self.logger.debug(f'Current search strat id: {searchstrat_id}, evidence review id: {evidence_review_id}, original search strat id: {original_searchstrat_id}')
+                self.logger.error(f'The number of search result articles does not match the number of search result articles in the vector search results: {e}')
+                
+                raise e 
+            except Exception as e: 
+                self.logger.error(f'Error retrieving search result articles for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}: {e}')
+                raise e 
+        
+            return rrf_sim_df
+        
+        else: 
+            self.logger.warning(f'No vector search results found for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}.')
+            #check evaluation set fo wheter current evidence review id is in there 
+            eval_set_df = self.retrieve_evaluation_set(evidence_review_id)
+            if evidence_review_id not in eval_set_df['evidence_review_id'].unique(): 
+                self.logger.warning(f'Current evidence review id: {evidence_review_id} is not in the evaluation set. This is likely due to no new articles included for current evidence review id. Verify this is intended.')
+                return pd.DataFrame()
+            else: 
+                self.logger.error(f'Evaluation set found for search strategy id: {original_searchstrat_id} and corresponding evidence review id: {evidence_review_id}.')
+                raise Exception('Unexpected error occured. ')
+
     
     def retrieve_evaluation_set(self, evidence_review_id : str): 
         '''
