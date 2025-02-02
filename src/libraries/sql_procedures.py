@@ -291,15 +291,17 @@ class sql_procedures:
                 # Create view
                 for query in queries: 
                     conn.execute(text(query))
-                result = conn.execute(text("SELECT COUNT(*) FROM groundtruth_eval_set_2017new"))
-                actual_count = result.scalar()
+                result = pd.read_sql("SELECT * FROM groundtruth_eval_set_2017new", self.engine)
+                actual_count = result.shape[0]
                 
                 # Compare with expected
-                expected_count = pd.read_parquet(Path(__file__).parent.parent / 'dataset' / 'groundtruth_eval.parquet').shape[0]
+                expected= pd.read_parquet(Path(__file__).parent.parent / 'dataset' / 'groundtruth_eval.parquet')
+                expected_count = expected.shape[0]
                 
                 # Check counts but only warn if mismatch
                 if actual_count != expected_count:
                     self.logger.warning(f"Row count mismatch: expected {expected_count} rows, but got {actual_count}. Check SQL query.")
+                    self.logger.warning(f"ID difference: {set(result['ground_truth_article_id']) - set(expected['included_article_id'])}")
                 else:
                     self.logger.info(f"Ground truth evaluation set view created successfully with {actual_count} rows")
                 
@@ -536,7 +538,7 @@ class sql_procedures:
         -- Retrieve search result articles and embeddings, depending on the database id,  taken from the orignal search strategy id
         
         search_result_articles_emb AS (
-            SELECT
+            SELECT DISTINCT on (sra.original_id)
                 sra.search_result_article_id, 
                 sra.original_id, 
                 ss.database_id, 
@@ -566,6 +568,7 @@ class sql_procedures:
             FROM search_result_articles sra 
             JOIN search_strategies ss ON sra.search_strategy_id = ss.search_strategy_id 
             WHERE ss.search_strategy_id = {original_searchstrat_id}
+            ORDER BY sra.original_id, sra.search_result_article_id
         ),
 
         -- Calculate cosine similarity between query vectors and search result articles  
@@ -573,6 +576,7 @@ class sql_procedures:
             SELECT 
                 query_vectors.{query_vector_id}, 
                 search_result_articles_emb.search_result_article_id, 
+                search_result_articles_emb.original_id,
                 search_result_articles_emb.search_strategy_id, 
                 1 - (query_vectors.embeddings <=> search_result_articles_emb.embeddings) AS cosine_similarity
             FROM query_vectors 
@@ -585,6 +589,7 @@ class sql_procedures:
             SELECT
                 {query_vector_id}, 
                 search_result_article_id, 
+                original_id,
                 search_strategy_id, 
                 cosine_similarity, 
                 ROW_NUMBER() OVER (
@@ -626,7 +631,7 @@ class sql_procedures:
         '''
         Prepares the query vector queries for the vector search 
         '''
-        if topic_specific_overall_flag:  # Topic-specific case
+        if topic_specific_overall_flag == True:  # Topic-specific case
             if vector_search_type == 'zero-shot': 
                 query_table_name = 'query_evidencereview_topic_embeddings'
                 id = 'evidence_review_id'
@@ -665,7 +670,7 @@ class sql_procedures:
                     WHERE selected_goldset_articles.evidence_review_id = '{evidence_review_id}'
                 """
 
-        else:  #overarching case 
+        elif topic_specific_overall_flag == False:  #overarching case 
             evidence_review_id = 'overall'
             if vector_search_type == 'zero-shot': 
                 query_table_name = 'query_evidencereview_topic_embeddings'
@@ -673,7 +678,7 @@ class sql_procedures:
                  #get all evidence review topic embeddings 
                 goldset_query_filter = f""
 
-            elif vector_search_type == 'one-shot': 
+            if vector_search_type == 'one-shot': 
             
                 query_table_name = 'query_goldset_embeddings'
                 id = 'ground_truth_article_id'
@@ -689,7 +694,7 @@ class sql_procedures:
                         ) selected_goldset_articles 
                     ON {query_table_name}.{id} = selected_goldset_articles.selected_article_id
                 """
-            elif vector_search_type == 'few-shot': 
+            if vector_search_type == 'few-shot': 
                 query_table_name = 'query_goldset_embeddings'
                 id = 'ground_truth_article_id'
                 #get all prepared goldset embeddings (which amounts to 3 articles per evidence review id)
@@ -715,7 +720,7 @@ class sql_procedures:
         if not sim_df.empty: 
             self.logger.info(f'Calculating RRF scores')
             sim_df['rrf_score'] = 1 / (60 + sim_df['rank'])
-            rrf_sim_df = sim_df.groupby('search_result_article_id').agg({
+            rrf_sim_df = sim_df.groupby('original_id').agg({
                 'rrf_score': 'sum', #sum of rrf scores across all input query vectors
                 'cosine_similarity': 'mean', #averge cosine similiarity across all input query vectors
                 'search_strategy_id': 'first' #search strategy id of the input query vector
@@ -726,12 +731,12 @@ class sql_procedures:
             rrf_sim_df = rrf_sim_df.sort_values(by = ['rrf_score'], ascending = False)
 
             #retrieve corresponding serach result articles based on search_strat_id (original)
-            sra_df = pd.read_sql(f"SELECT * FROM search_result_articles WHERE search_strategy_id = {original_searchstrat_id}", self.engine)
+            sra_df = pd.read_sql(f"SELECT DISTINCT ON (sra.original_id) * FROM search_result_articles sra WHERE sra.search_strategy_id = {original_searchstrat_id}", self.engine)
             try: 
                 with self.engine.begin() as conn: 
                     assert len(rrf_sim_df) == len(sra_df)
                     self.logger.info(f'rrf_sim_df and sra_df have the same number of rows, moving on to merging')
-                    rrf_sim_df = rrf_sim_df.merge(sra_df, on='search_result_article_id', how='left', suffixes = ('_rrf', '_unranked'))
+                    rrf_sim_df = rrf_sim_df.merge(sra_df, on='original_id', how='left', suffixes = ('_rrf', '_unranked'))
             
             except AssertionError as e: 
                 self.logger.debug(f'Current search strat id: {searchstrat_id}, evidence review id: {evidence_review_id}, original search strat id: {original_searchstrat_id}')

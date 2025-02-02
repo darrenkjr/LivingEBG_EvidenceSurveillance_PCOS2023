@@ -196,6 +196,7 @@ class sql_data_migration:
 
 
     def migrate_gdg_data(self):
+        
         _df = pd.read_excel(self.gdg_data_path, sheet_name='rq_evidence_review')
         gdg_extract = _df[['GDG', 'Topic']].copy()
         gdg_extract.rename(columns = {'GDG' : 'gdg_id', 'Topic' : 'topic'}, inplace=True)

@@ -4,6 +4,7 @@ import rispy
 import pyarrow
 from dataclasses import dataclass, asdict
 from datetime import datetime
+import re
 
 #read in ground 
 @dataclass 
@@ -20,12 +21,14 @@ class eval_metrics:
 @dataclass
 class vectorsearch_eval_metrics: 
     nnr_raw: int # nnr before cutoff 
-    nnr_first : int #nnr before screening first correct result 
+    rank_new_relevant : int #nnr before screening first correct result (not in goldset)
+    rank_first_relevant : int #nnr before screening first correct result (all))
     nnr_threshold: int # total nnr after applying similiarity threshold
     n_retrieved: int 
     n_missed: int
     recall: float
     precision: float
+    precision_cutoff: float
     f1_score: float
     f2_score: float
     f3_score: float
@@ -33,6 +36,8 @@ class vectorsearch_eval_metrics:
     recall_at_100: float 
     recall_at_1000: float
     similarity_threshold_cutoff: float
+    mrr: float
+    mrr_new_relevant: float
 
 
 
@@ -217,36 +222,45 @@ class search_evaluation:
 
     
     def _load_topic_specific_search_results(self): 
+        self.logger.info(f'Loading comparison set')
+        comparison_set = self.eval_groundtruth_df.copy()
 
         self.logger.info('Loading search results...')
 
         #check if cosonolidated results path arlready exists 
-        
         if self.consolidated_results_path.exists(): 
             results_df = pd.read_parquet(self.consolidated_results_path)
             results_df = self._standardize_results(results_df)
         else: 
             self.logger.info(f'Consolidated search results do not exist, loading from {str(self.search_results_path)}')
-
-            # self.eval_groundtruth_df['question_id'] = self.eval_groundtruth_df['question_id'].map(lambda x: self.question_id_mappings.get(x, x))
-            valid_question_id = list(self.eval_groundtruth_df['question_id'].unique())
             results_df = pd.DataFrame()
 
             for file in self.search_results_path.iterdir(): 
                 if file.suffix == '.ris': 
-                    # Do all string operations in one line
-                    current_question_id = file.stem.rsplit('_', 1)[0].replace('gdg', '').replace('_', '.')
-                    self.logger.info(f'Processing current detected question id:: {current_question_id}')
-                    if current_question_id == '.4.9' or current_question_id in self.question_id_mappings: 
-                        self.logger.warning(f'Question id requiring mapping detected : {current_question_id}, mapping to {self.question_id_mappings[current_question_id]}')
-                        current_question_id = self.question_id_mappings[current_question_id]
+
                     #read current file 
                     with open(file, 'r', encoding='utf-8') as f: 
-                            df = pd.DataFrame(rispy.load(f, skip_unknown_tags = True))
-                            df['question_id'] = current_question_id
-                            results_df = pd.concat([results_df, df], ignore_index=True)
+                                                # Do all string operations in one line
+                        self.logger.info(f'Processing current file: {file.name}')
+                        current_question_id = file.stem.rsplit('_', 1)[0].replace('gdg', '').replace('_', '.')
+                        if current_question_id == '.4.9' or current_question_id in self.question_id_mappings: 
+                            self.logger.warning(f'Question id requiring mapping detected : {current_question_id}, mapping to {self.question_id_mappings[current_question_id]}')
+                            current_question_id = self.question_id_mappings[current_question_id]
+                        self.logger.info(f'Processing current detected question id:: {current_question_id}')
+                        df = pd.DataFrame(rispy.load(f, skip_unknown_tags = True))
+                        df['question_id'] = current_question_id
+                        df['origin_file'] = file.name
+                        results_df = pd.concat([results_df, df], ignore_index=True)
             
             results_df = self._standardize_results(results_df)
+            _question_id_list = list(results_df['question_id'].unique()) 
+            _comparison_question_id_list = list(comparison_set['question_id'].unique())
+            try: 
+                assert set(_comparison_question_id_list).issubset(set(_question_id_list)) , f'Question ids do not match between results and comparison set'
+            except AssertionError as e: 
+                missing_question_ids = set(_comparison_question_id_list) - set(_question_id_list)
+                self.logger.error(f'Missing question_ids in results: {missing_question_ids}')
+                raise
             results_df.to_parquet(self.consolidated_results_path)
             self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
             
@@ -268,7 +282,8 @@ class search_evaluation:
         results_df[self.result_id_col] = results_df[self.result_id_col].str.lower()
         if self.database == 'oa': 
             #remove leading 'https://openalex.org/' from result_id_col
-            results_df[self.result_id_col] = results_df[self.result_id_col].str.replace('https://openalex.org/', '').str.lower()
+            results_df[self.result_id_col] = results_df[self.result_id_col].str.replace('https://openalex.org/', '').str.lower().str.strip()
+            self.eval_groundtruth_df[self.eval_id_col] = self.eval_groundtruth_df[self.eval_id_col].str.replace('https://openalex.org/', '').str.lower().str.strip()
 
         evalmetrics_df = pd.DataFrame()
         self.logger.info(f'Evaluating matches for {self.database} {self.search_type} {self.strategy_type} {self.vector_search_flag}')
@@ -279,7 +294,7 @@ class search_evaluation:
         self.question_id = 'overall'
         metrics_groundtruth = self.calc_eval_metrics(match_results_df, self.eval_groundtruth_df, results_df)
         metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
-        metrics_groundtruth_df['performance_on'] = 'groundtruth_2017edition'
+        metrics_groundtruth_df['performance_on'] = 'newlyadded_2023edition'
         metrics_groundtruth_df['question_id'] = self.question_id
         evalmetrics_df = pd.concat([metrics_groundtruth_df], ignore_index=True)
         #save matched and missed results 
@@ -287,28 +302,33 @@ class search_evaluation:
         evalmetrics_df['search_type'] = self.search_type
         evalmetrics_df['strategy_type'] = self.strategy_type
         evalmetrics_df['vector_search'] = self.vector_search_flag
-        self._save_eval_results(evalmetrics_df)
         self._save_match_missed_results(match_results_df, missed_results_df)
 
-    
 
-        # if self.search_type == 'topic_specific': 
-        #     grouped_evalmetrics_df = pd.DataFrame()
-        #     for question_id, grouped_groundtruth_df in self.eval_groundtruth_df.groupby('question_id'): 
-        #         self.question_id = question_id
-        #         grouped_df = results_df[results_df['question_id'] == question_id]
-        #         match_results_df, missed_results_df = self._evaluate_matches(grouped_groundtruth_df, grouped_df)
-        #         metrics_groundtruth = self.calc_eval_metrics(match_results_df, grouped_groundtruth_df, grouped_df)
-        #         metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
-        #         metrics_groundtruth_df['performance_on'] = 'groundtruth'
-        #         metrics_groundtruth_df['question_id'] = self.question_id
-        #         grouped_evalmetrics_df = pd.concat([grouped_evalmetrics_df, metrics_groundtruth_df], ignore_index=True)
+        if self.search_type == 'topic_specific': 
+            grouped_evalmetrics_df = pd.DataFrame()
+            for question_id, grouped_groundtruth_df in self.eval_groundtruth_df.groupby('question_id'): 
+                self.question_id = question_id
+                grouped_df = results_df[results_df['question_id'] == question_id]
+                match_results_df, missed_results_df = self._evaluate_matches(grouped_groundtruth_df, grouped_df)
+                metrics_groundtruth = self.calc_eval_metrics(match_results_df, grouped_groundtruth_df, grouped_df)
+                metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
+                metrics_groundtruth_df['performance_on'] = 'newlyadded_2023edition'
+                metrics_groundtruth_df['question_id'] = question_id
+                metrics_groundtruth_df['database'] = self.database
+                metrics_groundtruth_df['search_type'] = self.search_type
+                metrics_groundtruth_df['strategy_type'] = self.strategy_type
+                metrics_groundtruth_df['vector_search'] = self.vector_search_flag
+                grouped_evalmetrics_df = pd.concat([grouped_evalmetrics_df, metrics_groundtruth_df], ignore_index=True)
             
-        
-            # self._save_eval_results(grouped_evalmetrics_df)
+                self._save_match_missed_results(match_results_df, missed_results_df)
 
-            # evalmetrics_df = pd.concat([evalmetrics_df, grouped_evalmetrics_df], ignore_index=True)
+            evalmetrics_df = pd.concat([evalmetrics_df, grouped_evalmetrics_df], ignore_index=True)
 
+
+        first_few_cols = ['question_id', 'performance_on', 'database', 'search_type', 'strategy_type', 'vector_search']
+        other_cols = [col for col in evalmetrics_df.columns if col not in first_few_cols]
+        evalmetrics_df = evalmetrics_df.reindex(columns=first_few_cols + other_cols)
 
         return evalmetrics_df      
 
@@ -329,13 +349,11 @@ class search_evaluation:
         results_df = results_df.copy()
         comparison_df = comparison_df.copy()
         
-        results_df['clean_id'] = results_df[self.result_id_col].astype(str).str.lower().str.strip()
-        comparison_df['clean_id'] = comparison_df[self.eval_id_col].astype(str).str.lower().str.strip()
+        results_df['clean_id'] = results_df[self.result_id_col].astype(str).str.lower().str.strip().str.replace(r's\+', '')
+        comparison_df['clean_id'] = comparison_df[self.eval_id_col].astype(str).str.lower().str.strip().str.replace(r's\+', '')
+        results_df_dedupe = results_df.drop_duplicates(subset = 'clean_id')
         # Log after cleaning
         self.logger.info(f"Comparison / evaluation set - Total: {len(comparison_df)}, Unique IDs: {comparison_df['clean_id'].nunique()}")
-
-        #drop duplicate before matching 
-        results_df_dedupe = results_df.drop_duplicates(subset = 'clean_id')
         self.logger.info(f'Evaluating based on {self.result_id_col} in results df, and {self.eval_id_col} in comparison df')
         # Find matches using merge
         matched_results_df = pd.merge(
@@ -343,13 +361,15 @@ class search_evaluation:
             results_df_dedupe,
             left_on='clean_id',
             right_on='clean_id',
-            how='inner'
+            how='inner',
+            suffixes = ('', '_results')
         )
         
         # Find missed using merge
         missed_results_df = comparison_df[
             ~comparison_df['clean_id'].isin(matched_results_df['clean_id'])
         ]
+
 
             
     # Validate
@@ -371,15 +391,16 @@ class search_evaluation:
             
     def calc_eval_metrics(self, match_df: pd.DataFrame, comparison_df: pd.DataFrame, raw_results_df : pd.DataFrame) -> eval_metrics:   
         self.logger.info(f'Calculating evaluation metrics for current {self.question_id}...')
-        nnr = len(raw_results_df)
+        
 
         #check length of match df 
         if len(match_df) == 0: 
             self.logger.warning(f'No matches found for {self.question_id}')
-            return eval_metrics(nnr, 0, 0, 0, 0, 0)
+            return eval_metrics(nnr = 0, n_retrieved = 0, n_missed = len(comparison_df), recall = 0, precision = 0, f1_score = 0, f2_score = 0, f3_score = 0)
         
         recall = len(match_df) / len(comparison_df)
         precision = len(match_df) / len(raw_results_df)
+        nnr = 1/precision
         n_retrieved = len(match_df)
         n_missed = len(comparison_df) - len(match_df)
         f1 = self._calc_fscore(precision, recall, 1)
@@ -397,7 +418,6 @@ class search_evaluation:
         return eval_metrics(nnr, n_retrieved, n_missed, recall, precision, f1, f2, f3)
     
     def _evaluate_vs_matches(self, evaluation_df : pd.DataFrame, rrf_sim_result_df : pd.DataFrame, database_name : str) -> pd.DataFrame: 
-
 
 
         eval_id_dct = {
@@ -423,7 +443,7 @@ class search_evaluation:
         left_on=eval_id_col,
         right_on='original_id',
         how='inner')
-        
+
         return matches
 
     
@@ -444,9 +464,9 @@ class search_evaluation:
         if len(comparison_df) == 0: 
             self.logger.warning(f'No comparison / evalutation set found for current evidence_review_id. Verify this is intended. Returning empty results.')
             return vectorsearch_eval_metrics(
-                nnr_raw= 0, nnr_first= 0, nnr_threshold= 0, 
+                nnr_raw= 0, rank_new_relevant= 0, nnr_threshold= 0, mrr = 0,
                 n_retrieved= 0, n_missed= 0, 
-                recall= 0, precision= 0, 
+                recall= 0, precision= 0, precision_cutoff= 0, 
                 f1_score= 0, f2_score= 0, f3_score= 0, 
                 recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, 
                 similarity_threshold_cutoff= 0), pd.DataFrame()
@@ -457,30 +477,28 @@ class search_evaluation:
             raw_results_df_dedupe = raw_results_df.sort_values('combined_rank_rrf').copy()
             #evaluate matches 
             matches = self._evaluate_vs_matches(comparison_df, raw_results_df_dedupe, self.database)
-            recall = len(matches) / len(comparison_df) #recall of the search (raw)
 
-            #non ranked metrics 
-            nnr_raw = len(raw_results_df_dedupe) # total number of results to read before looking at ranking 
-            self.logger.info(f'Total number of results to read before looking at ranking: {nnr_raw}')
-            n_retrieved = len(matches) #total number of sucessful matches / results retrived 
-            self.logger.info(f'Total number of sucessful matches / results retrived: {n_retrieved}')
-            n_missed = len(comparison_df) - len(matches) #total number of missed results 
-            self.logger.info(f'Total number of missed results: {n_missed}')
-            self.logger.info(f'Recall of the search (raw): {recall}')
-            precision = len(matches) / len(raw_results_df_dedupe) #precision of the search (raw)
-        
-            self.logger.info(f'Precision of the search (raw): {precision}')
-            f1 = self._calc_fscore(precision, recall, 1)
-            f2 = self._calc_fscore(precision, recall, 2)
-            f3 = self._calc_fscore(precision, recall, 3)
-            matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_vector_df['ground_truth_article_id'])]
-            #ranked metrics 
-            if len(matches) > 0: 
+            if len(matches) > 0:
+
+                recall = len(matches) / len(comparison_df) #recall of the search (raw)
+                #non ranked metrics 
+                n_retrieved = len(matches) #total number of sucessful matches / results retrived 
+                n_missed = len(comparison_df) - len(matches) #total number of missed results 
+                precision = len(matches) / len(raw_results_df_dedupe) #precision of the search (raw)
+                nnr_raw = 1/precision # total number of results to read before looking at ranking 
+                precision_cutoff = precision
+                
+                f1 = self._calc_fscore(precision, recall, 1)
+                f2 = self._calc_fscore(precision, recall, 2)
+                f3 = self._calc_fscore(precision, recall, 3)
+                #ranked metrics 
                 matches_filter_goldset = matches[~matches['ground_truth_article_id'].isin(query_vector_df['ground_truth_article_id'])]
                 #find first match that isn't in the goldset (ie: a theoretically new match)
-                nnr_first = matches_filter_goldset['combined_rank_rrf'].min()
-                self.logger.info(f'Rank of first match not in goldset: {nnr_first}')
-             
+                rank_new_relevant = matches_filter_goldset['combined_rank_rrf'].min()
+                rank_first_relevant = matches['combined_rank_rrf'].min()
+                mrr_new_relevant = 1/rank_new_relevant #mean reciprocal rank 
+                mrr = 1/rank_first_relevant #mean reciprocal rank 
+                
             
                 recall_at_k_dct = {}
                 for k in [10, 100, 1000]: 
@@ -489,37 +507,56 @@ class search_evaluation:
                         # Count matches in top k (including duplicates)
                         matches_at_k = matches[matches['original_id'].isin(top_k_ids)].shape[0]
                         recall_at_k = matches_at_k / len(comparison_df)
-                    self.logger.info(f'Recall at {k}: {recall_at_k}')
-
+                    
                     recall_at_k_dct[f'recall_at_{k}'] = recall_at_k
 
-                similarity_threshold_cutoff = matches_filter_goldset['cosine_similarity'].min()
-                self.logger.info(f'Similarity threshold cutoff: {similarity_threshold_cutoff}')
-
+                similarity_threshold_cutoff = matches['cosine_similarity'].min()
+                
                 result_cutoff_df = raw_results_df_dedupe.query(f'cosine_similarity >= {similarity_threshold_cutoff}')
-                nnr_threshold = len(result_cutoff_df)
-                self.logger.info(f'Number of results to read after similarity threshold cutoff: {nnr_threshold}')
+                
+                
                 matched_cutoff = self._evaluate_vs_matches(comparison_df, result_cutoff_df, self.database)
                 recall_cutoff = len(matched_cutoff) / len(comparison_df)
+                precision_cutoff = len(matched_cutoff) / len(result_cutoff_df)
+                nnr_threshold = 1/precision_cutoff
+                
                 assert recall_cutoff == recall 
                  #check recall for the trimmed results 
                 recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
 
             elif len(matches) == 0: 
                 self.logger.warning(f'No matches found for current evidence_review_id. Returning 0 recall.')
-                nnr_raw = 'N/A'
-                nnr_first = 'N/A'
-                similarity_threshold_cutoff = 'N/A'
-                nnr_threshold = 'N/A'
-                recall_at_10 = 'N/A'
-                recall_at_100 = 'N/A'
-                recall_at_1000 = 'N/A'
-                result_cutoff_df = pd.DataFrame()
+                return vectorsearch_eval_metrics(
+                    nnr_raw= 'N/A', rank_new_relevant= 'N/A', nnr_threshold= 'N/A',
+                    n_retrieved= 0, n_missed= len(comparison_df), 
+                    recall= 0, precision= 0, precision_cutoff= 0, 
+                    f1_score= 0, f2_score= 0, f3_score= 0, 
+                    recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, 
+                    similarity_threshold_cutoff= 0, mrr_new_relevant= 0, mrr= 0, rank_first_relevant= 0), pd.DataFrame()
                 
 
-           
+            assert (0 <= recall) and (recall <= 1), f'Recall is {recall}, which is not a valid recall value'
 
-            return vectorsearch_eval_metrics(nnr_raw= nnr_raw, nnr_first= nnr_first, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff), result_cutoff_df
+            self.logger.info(f'Total number of sucessful matches / results retrived: {n_retrieved}')
+            self.logger.info(f'Total number of missed results: {n_missed}')
+            self.logger.info(f'Recall of the search (raw): {recall}')
+            self.logger.info(f'Precision of the search (raw): {precision}')
+            self.logger.info(f'NNR of the search (raw): {nnr_raw}')
+            self.logger.info(f'Similarity threshold cutoff: {similarity_threshold_cutoff}')
+            self.logger.info(f'Recall of the search (cutoff): {recall_cutoff}')
+            self.logger.info(f'Precision of the search (cutoff): {precision_cutoff}')
+            self.logger.info(f'NNR of the search (cutoff): {nnr_threshold}')
+            self.logger.info(f'Rank of first match not in goldset: {rank_new_relevant}')
+            self.logger.info(f'Rank of first relevant match (including goldset): {rank_first_relevant}')
+            self.logger.info(f'Mean reciprocal rank (traditional): {mrr}')
+            self.logger.info(f'Mean reciprocal rank (including goldset): {mrr_new_relevant}')
+            self.logger.info(f'Recall at first 10: {recall_at_10}')
+            self.logger.info(f'Recall at first 100: {recall_at_100}')
+            self.logger.info(f'Recall at first 1000: {recall_at_1000}')
+            
+            
+
+            return vectorsearch_eval_metrics(nnr_raw= nnr_raw, rank_new_relevant= rank_new_relevant, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, precision_cutoff= precision_cutoff, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff, mrr_new_relevant= mrr_new_relevant, mrr= mrr, rank_first_relevant= rank_first_relevant), result_cutoff_df
         
     
     def _calc_fscore(self, precision: float, recall: float, beta: float = 1) -> float: 
@@ -551,16 +588,38 @@ class search_evaluation:
             self.logger.error(f'Error saving evaluation results: {e}')
             raise
 
-    def _save_match_missed_results(self, match_results_df: pd.DataFrame, missed_results_df: pd.DataFrame): 
-        match_results_df.to_parquet(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
-        missed_results_df.to_parquet(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
+    def _save_match_missed_results(self, match_results_df: pd.DataFrame, missed_results_df: pd.DataFrame):
 
-        #also save as csv for troubleshooting (missed reuslts only)
-        missed_results_df.to_csv(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
-        #matched results to csv 
-        match_results_df.to_csv(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
-    
-    
+        if self.search_type == 'overarching': 
+            match_results_df.to_parquet(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
+            missed_results_df.to_parquet(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
+
+            #also save as csv for troubleshooting (missed reuslts only)
+            missed_results_df.to_csv(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
+            #matched results to csv 
+            match_results_df.to_csv(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
+        
+        elif self.search_type == 'topic_specific': 
+            #grab question_id from match_results_df
+            question_id = self.question_id
+            # Clean question_id
+            # Replace dots and slashes with underscores
+            question_id = question_id.replace('.', '_')
+            question_id = question_id.replace('/', '_')
+            
+            # Remove backslashes if any
+            question_id = re.sub(r'\\+', '', question_id)
+            # Remove double backslashes
+
+            #create directory if it doesn't exist
+            self.logger.info(f'Saving results for question_id: {question_id}')
+            (self.save_eval_missed_results_path / f'question_{question_id}').mkdir(parents=True, exist_ok=True)
+            match_results_df.to_parquet(self.save_eval_path / f'question_{question_id}' / f'matched_results_{self.database}_{question_id}.parquet')
+            missed_results_df.to_parquet(self.save_eval_missed_results_path / f'question_{question_id}' / f'missed_results_{self.database}_{question_id}.parquet')
+            match_results_df.to_csv(self.save_eval_path / f'question_{question_id}' / f'matched_results_{self.database}_{question_id}.csv')
+            missed_results_df.to_csv(self.save_eval_missed_results_path / f'question_{question_id}' / f'missed_results_{self.database}_{question_id}.csv')
+
+
     def run_eval_pipeline(self): 
 
         if self.vector_search_flag == False: 

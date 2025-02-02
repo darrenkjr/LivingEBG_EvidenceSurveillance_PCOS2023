@@ -91,9 +91,9 @@ class ConvenienceFunc:
         dataset_dir = file_dir.parent / 'dataset' / '_superseded'
         output_dir = file_dir.parent / 'dataset' 
 
-        rq_dataset_path = dataset_dir / 'PCOS_Guideline_Dataset_checked.xlsm'
+        rq_dataset_path = dataset_dir / 'PCOS_Guideline_Dataset.xlsm'
         apiretrieved_groundtruth_path = dataset_dir / 'api_retrieved_final.xlsx'
-        unsucessful_rob_path = dataset_dir / 'all_unsuccessful_nodupe_rob_FIXED.csv'
+        unsucessful_rob_path = dataset_dir / 'all_unsuccessful_nodupe_rob_FINAL.csv'
 
         #read in PCOS dataset, and extract valid rqs 
         self.original_df = pd.read_excel(rq_dataset_path, sheet_name='rq_evidence_review', engine='openpyxl', dtype={'question_id': str})
@@ -130,7 +130,7 @@ class ConvenienceFunc:
                                         sheet_name="api_results_oa", 
                                         engine='openpyxl', 
                                         dtype={'included_article_id': str})
-        oa_groundtruth_df = self._fix_question_ids(oa_groundtruth_df)
+    
 
         # Embase dataset
         print("\nEMBASE Dataset:")
@@ -142,14 +142,14 @@ class ConvenienceFunc:
         print(embase_groundtruth_df[['primary_title', 'notes_abstract']].isna().sum())
         embase_groundtruth_df['primary_title'] = embase_groundtruth_df['primary_title'].fillna(embase_groundtruth_df['title_2ndsearch'])
         embase_groundtruth_df['notes_abstract'] = embase_groundtruth_df['notes_abstract'].fillna(embase_groundtruth_df['abstract_2ndsearch'])
-        embase_groundtruth_df = self._fix_question_ids(embase_groundtruth_df)
+
         # PubMed dataset
         print("\nPubMed Dataset:")
         pmed_groundtruth_df = pd.read_excel(apiretrieved_groundtruth_path, 
                                         sheet_name="api_results_pubmed", 
                                         engine='openpyxl', 
                                         dtype={'included_article_id': str, 'api_id_retrieved' : str})
-        pmed_groundtruth_df = self._fix_question_ids(pmed_groundtruth_df)
+
         # Fix: Fill each column separately
         pmed_groundtruth_df['title'] = pmed_groundtruth_df['title'].fillna(pmed_groundtruth_df['title_2ndsearch'])
         pmed_groundtruth_df['abstract'] = pmed_groundtruth_df['abstract'].fillna(pmed_groundtruth_df['abstract_2ndsearch'])
@@ -202,6 +202,18 @@ class ConvenienceFunc:
         fullgroundtruth_valid_apimerge_df['title'] = fullgroundtruth_valid_apimerge_df['title'].apply(lambda x: self.clean_html_tags(x) if pd.notna(x) else x)
         fullgroundtruth_valid_apimerge_df['abstract'] = fullgroundtruth_valid_apimerge_df['abstract'].apply(lambda x: self.clean_html_tags(x) if pd.notna(x) else x)
         fullgroundtruth_valid_apimerge_df.reset_index(inplace = True)
+        fullgroundtruth_valid_apimerge_df['retrieved_oa_id'] = fullgroundtruth_valid_apimerge_df['retrieved_oa_id'].apply(lambda x: str(x).lower().strip() if pd.notna(x) else pd.NA)
+        fullgroundtruth_valid_apimerge_df['retrieved_embase_id'] = fullgroundtruth_valid_apimerge_df['retrieved_embase_id'].apply(lambda x: str(x).lower().strip() if pd.notna(x) else pd.NA)
+        fullgroundtruth_valid_apimerge_df['retrieved_pubmed_id'] = fullgroundtruth_valid_apimerge_df['retrieved_pubmed_id'].apply(lambda x: str(x).lower().strip() if pd.notna(x) else pd.NA)
+        
+        #ensure typing for publication years and serach strat years 
+        fullgroundtruth_valid_apimerge_df['year_pub_extract'] = pd.to_numeric(fullgroundtruth_valid_apimerge_df['year_pub_extract'], errors='coerce')
+        fullgroundtruth_valid_apimerge_df['searchstrat_year_start'] = pd.to_numeric(fullgroundtruth_valid_apimerge_df['searchstrat_year_start'], errors='coerce')
+        fullgroundtruth_valid_apimerge_df['searchstrat_year_end'] = pd.to_numeric(fullgroundtruth_valid_apimerge_df['searchstrat_year_end'], errors='coerce')
+        print(f'Length of ground truth after cleaning: {len(fullgroundtruth_valid_apimerge_df)}')
+        #clean question _ids 
+        fullgroundtruth_valid_apimerge_df = self._fix_question_ids(fullgroundtruth_valid_apimerge_df)
+        
         #save for later use (evaluation)
         fullgroundtruth_valid_apimerge_df.to_excel(output_dir / 'fullgroundtruth_valid_apimerge_df.xlsx', index=False)
         #also save as parquet to preserve data types 
@@ -252,6 +264,7 @@ class ConvenienceFunc:
         print('Original length of ground truth:', len(groundtruth_eval_df))
 
         groundtruth_eval_df = groundtruth_eval_df.query('(searchstrat_year_start <= year_pub_extract) | (searchstrat_year_start.isna())')
+        self.logger.warning(f'Question ids not in ground truth: {set(groundtruth_df["question_id"].unique()) - set(groundtruth_eval_df["question_id"].unique())}')
         #check that all question_ids are present 
         known_question_ids_no_new_articles = {'5.7.5', '5.7.1'}
         try: 
@@ -273,15 +286,16 @@ class ConvenienceFunc:
         
         return groundtruth_eval_df
     
-    def _fix_question_ids(self,df): 
-        df['question_id'] = (
-            df['question_id']
+    def _fix_question_ids(self, df):
+        """Clean question IDs in the DataFrame"""
+        df['question_id'] = (df['question_id']
             .astype(str)
-            .str.replace(r'\s+', '', regex=True)
-            .str.replace(',', '/', regex=False)
-            .str.replace('1.10.', '1.10', regex=False)
+            .str.replace(r'\s+', '', regex=True)    # Remove all whitespace
+            .str.replace(',', '/', regex=False)      # Replace commas with slashes
+            .str.replace('1.10.', '1.10', regex=False)  # Fix specific cases
             .str.replace('4.10.', '4.10', regex=False)
-        )
+            .str.lower()                            # Convert to lowercase
+            .str.strip())                           # Remove leading/trailing whitespace
         return df
 
 

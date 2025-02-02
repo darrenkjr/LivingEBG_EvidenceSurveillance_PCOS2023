@@ -163,7 +163,7 @@ class vector_search_implementation():
                 self._generate_embeddings
             )
 
-            #retrieve database name 
+            #retrieve database name f
             self.logger.info(f'Adding embeddings for search result articles associated with database: {database_name}')
             self.sql_procedures.add_embeddings_to_sql(input_df = search_result_articles_df, embedding_table_name = f'searchspace_database_{database_name}_embeddings', linking_id = 'search_result_article_id')
         except ValueError as e: 
@@ -202,7 +202,7 @@ class vector_search_implementation():
             input_searchstrat_df['evidence_review_id'], 
             input_searchstrat_df['vector_search']): 
 
-            self.sql_procedures.run_vector_search(original_searchstrat_id = original_searchstrat_id, searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id, vector_search_type = vs_type)
+            self.sql_procedures.run_vector_search(original_searchstrat_id = original_searchstrat_id, searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id, vector_search_type = vs_type, topic_specific_overall_flag = False)
             #ranked results output 
             rrf_sim_result_df = self.sql_procedures.rrf_combine_results(searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id, original_searchstrat_id = original_searchstrat_id)
             #conduct evaluation 
