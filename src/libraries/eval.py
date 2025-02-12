@@ -216,9 +216,10 @@ class search_evaluation:
             self.logger.info(f'Filtering results for year range {self.start_year_cutoff} to {self.end_year_cutoff}')
             _result_df = result_df.query(f'publication_year >= {self.start_year_cutoff} & publication_year <= {self.end_year_cutoff}')
             results_df = _result_df.copy()
-            results_df.to_parquet(self.consolidated_results_path)
+            results_df_dedupe = results_df.drop_duplicates(subset = self.result_id_col)
+            results_df_dedupe.to_parquet(self.consolidated_results_path)
             self.logger.info(f'Consolidated search results saved to: {str(self.consolidated_results_path)}')
-            return results_df
+            return results_df_dedupe
 
     
     def _load_topic_specific_search_results(self): 
