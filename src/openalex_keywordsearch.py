@@ -29,8 +29,13 @@ class oa_keywordsearch_dev:
         #double quatoes for exact match query
         query_kw_list = ['"PCOS"', 
                          '"PCOD"', 
-                         '"polycystic ovarian"', 
-                         '"polycystic ovary"',
+                         '("polycystic" AND "ovarian")', 
+                         '("polycystic" AND "ovary")',
+                         '("poly-cystic" AND "ovarian")',
+                         '("poly-cystic" AND "ovary")',
+                         '"stein-leventhal"',
+                         '"oligo-ovulation"',
+                         '"oligoovulation"',
                          '"anovulation"'] 
         
         try: 
@@ -53,7 +58,9 @@ class oa_keywordsearch_dev:
                         try: 
                             self.logger.info(f'Retrieving OpenAlex keyword search results for {query}')
                             results_df = await client.retrieve_oa_kwsearch_data(query)
-                            result_table = pa.Table.from_pandas(results_df)
+                            #deduplicate results based on id 
+                            results_df_dedupe = results_df.drop_duplicates(subset = 'id')
+                            result_table = pa.Table.from_pandas(results_df_dedupe)
                             pq.write_table(result_table, self.results_path / f'oa_boolkw_results_.parquet')
 
                         except Exception as e: 

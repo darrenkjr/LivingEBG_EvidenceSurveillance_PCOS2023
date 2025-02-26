@@ -15,6 +15,7 @@ dotenv.load_dotenv()
 from sqlalchemy import create_engine
 from pandas import ExcelWriter
 from openpyxl import load_workbook
+
 def main(): 
     ''''
     Main function running vector search 
@@ -78,12 +79,12 @@ def main():
     vector_search_cls = vector_search_implementation(logger = logger, engine = engine)
     vector_search_cls.generate_embeddings_if_needed()
 
-    for search_type in ['topic-specific']: 
+    for search_type in ['overarching', 'topic-specific']: 
         logger.info(f'Running vector search implementation for search type: {search_type}')
         eval_metrics_df = pd.DataFrame()
 
 
-        for vector_search_type in ['one-shot', 'few-shot', 'zero_shot']: 
+        for vector_search_type in ['one-shot', 'few-shot', 'zero-shot']: 
             _metrics_df = vector_search_cls.run_vector_search(search_type, vector_search_type)
             eval_results_path = Path(__file__).parent / 'evaluation_results' / 'overall' 
             eval_results_path.mkdir(parents=True, exist_ok=True) 
@@ -94,17 +95,26 @@ def main():
 
         #temporary - eventually add a function to write to database
         excel_path = eval_results_path / 'overall_evalmetrics_df.xlsx'
-        logger.info(f'Saving evaluation metrics for {search_type} vector search to {excel_path}')
-        with ExcelWriter(excel_path, 
-                        mode='a' if excel_path.exists() else 'w',
-                        engine='openpyxl',
-                        if_sheet_exists='replace') as writer:
+        if excel_path.exists():
+            try:
+                # Try to load existing data from sheet
+                existing_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+                combined_df = pd.concat([existing_df, eval_metrics_df], ignore_index=True)
+                
+                with pd.ExcelWriter(excel_path, mode='a', if_sheet_exists='replace') as writer:
+                    combined_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+            except ValueError as e:  # Sheet doesn't exist
+                with pd.ExcelWriter(excel_path, mode='a') as writer:
+                    eval_metrics_df.to_excel(writer, sheet_name=sheet_name, index=False)
+        else:
+            # New file
             eval_metrics_df.to_excel(
-                writer,
+                excel_path,
                 sheet_name=sheet_name,
                 index=False
             )
-        logger.info(f'Vector search complete for {search_type}')
+            logger.info(f'Vector search complete for {search_type}')
 
     logger.info(f'Vector search complete')
 

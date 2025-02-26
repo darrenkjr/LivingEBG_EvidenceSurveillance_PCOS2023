@@ -9,6 +9,8 @@ class LoggerConfig:
     def setup_logger(
         logger_name: str, 
         log_dir : Path = Path(__file__).parent.parent / 'logs', 
+        console_log_level : int = logging.INFO,
+        file_log_level : int = logging.WARNING,
         log_level : int = logging.DEBUG
     ) -> logging.Logger: 
         
@@ -35,11 +37,11 @@ class LoggerConfig:
             #create file handler to write to log file 
             timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
             file_handler = logging.FileHandler(log_dir / f'{logger_name}_{timestamp}.log')
-            file_handler.setLevel(log_level)
+            file_handler.setLevel(file_log_level)
 
             #create stream handler to print to console 
             console_handler = logging.StreamHandler()
-            console_handler.setLevel(log_level)
+            console_handler.setLevel(console_log_level)
 
             #create formatter 
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')

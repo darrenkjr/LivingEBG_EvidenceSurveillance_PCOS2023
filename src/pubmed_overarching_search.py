@@ -40,7 +40,8 @@ class pubmed_overarching_search:
             results_df = await pmed_client.get_pubmed_article_details(results_pmid_list)
             results_df['publication_year'] = pd.to_numeric(results_df['publication_year'], errors='coerce')
             results_df['publication_year'] = results_df['publication_year'].astype('Int64')
-            results_df.to_parquet(self.results_path / f'pubmed_booleankw_ovearching_search_results.parquet')
+            results_df_dedupe = results_df.drop_duplicates(subset = 'pmid')
+            results_df_dedupe.to_parquet(self.results_path / f'pubmed_booleankw_ovearching_search_results.parquet')
 
 
     async def pubmed_ovarching_search_eval_pipeline(self, query: str): 

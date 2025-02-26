@@ -8,6 +8,7 @@ dotenv.load_dotenv()
 import os 
 from libraries.convenience_func import ConvenienceFunc
 from urllib.parse import urlparse, parse_qsl, urlencode
+import hashlib
 
 
 class OpenAlexClient:
@@ -16,6 +17,7 @@ class OpenAlexClient:
         """Initialize client with rate limiting queue"""
         self.logger = logger
         self.email = os.getenv('email')
+        self.api_key = hashlib.md5(self.email.encode()).hexdigest()
         self.request_semaphore = asyncio.Semaphore(max_concurrent_requests)
         self.result_queue = asyncio.Queue()
         self.max_retries = max_retries
@@ -48,21 +50,21 @@ class OpenAlexClient:
                 f"to_publication_date:{end_date}&"
                 f"per-page=200&"
                 f"cursor={cursor}&"
-                f"mailto={self.email}")
+                f"apikey={self.api_key}")
     
     def _build_oa_topics_url(self, id_list:list): 
         '''
         Build OA api URL for each OA id chunk in list 
         '''
         id_chunk = '|'.join(id_list)
-        return f'https://api.openalex.org/works?filter=ids.openalex:{id_chunk}&select=id,title,primary_topic,primary_location&per-page=200&mailto={self.email}'
+        return f'https://api.openalex.org/works?filter=ids.openalex:{id_chunk}&select=id,title,primary_topic,primary_location&per-page=200&api_key={self.api_key}'
 
     def _build_oa_booleankw_search_url(self, query: list, start_date: str, end_date: str, cursor: str = '*', search_filter: str = 'title_and_abstract.search'): 
         '''
         Build OA api URL for each keyword query in list. 
         search_filter: title_and_abstract.search, default.search (title, abs and full text), title.search (title only), abstract.search (abstract only)
         '''
-        return f'https://api.openalex.org/works?filter={search_filter}:{query},from_publication_date:{start_date},to_publication_date:{end_date}&select=id,ids,title,abstract_inverted_index,publication_year&per-page=200&cursor={cursor}&mailto={self.email}'
+        return f'https://api.openalex.org/works?filter={search_filter}:{query},from_publication_date:{start_date},to_publication_date:{end_date}&select=id,ids,title,abstract_inverted_index,publication_year&per-page=200&cursor={cursor}&api_key={self.api_key}'
     
 
     async def retrieve_oa_kwsearch_data(self, query : str) -> pd.DataFrame: 

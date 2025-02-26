@@ -1,33 +1,36 @@
+import dotenv
+dotenv.load_dotenv()
 import pandas as pd 
 from datetime import datetime, timedelta
 import asyncio 
 import aiohttp
 from typing import List, Dict
-import dotenv
-dotenv.load_dotenv()
 import os 
 from libraries.convenience_func import ConvenienceFunc
 from urllib.parse import urlparse, parse_qsl, urlencode
 from metapub import PubMedFetcher
 from metapub.exceptions import MetaPubError
+from eutils import EutilsRequestError, EutilsNCBIError
+from urllib3.exceptions import ConnectTimeoutError
+from requests.exceptions import ConnectTimeout, RequestException
+import random 
 import traceback
 
 
-#implement same worker logic as openalex client 
-
 class PubMedClient: 
 
-    def __init__(self, max_concurrent_requests: int = 9, max_retries: int = 4, logger = None): 
+    def __init__(self, max_concurrent_requests: int = 8, max_retries: int = 3, logger = None): 
         self.logger = logger
-        
-        # self.api_key = os.getenv('NCBI_API_KEY')
+                # Debug: Before getting API key
         #date range generator to batch results - 2 year intervals from 1950 to 2022 
         self.request_semaphore = asyncio.Semaphore(max_concurrent_requests)
+        #check metapub has api key 
+        self.api_key = os.getenv('NCBI_API_KEY')
+        os.environ['NCBI_API_KEY'] = self.api_key
         self.result_queue = asyncio.Queue()
         self.max_retries = max_retries
         self.task_queue = asyncio.Queue()
         self.max_concurrent_requests = max_concurrent_requests
-        self.pubmed_fetcher = PubMedFetcher()
 
         
 
@@ -141,11 +144,13 @@ class PubMedClient:
 
         try: 
             while True: 
+
                 async with self.request_semaphore: 
                     #put syncornous function on its own thread 
+                    fetcher = PubMedFetcher()
                     self.logger.info(f'Sending PubMed Request with following params: Query: {query}, Since: {start_date}, Until : {end_date}, Current Chunk Start: {retstart}')
                     result_chunk = await asyncio.to_thread(
-                        self.pubmed_fetcher.pmids_for_query,
+                        fetcher.pmids_for_query,
                     query=query,
                     since=start_date,
                     until=end_date,
@@ -183,23 +188,64 @@ class PubMedClient:
         while retries < self.max_retries: 
             try: 
                 async with self.request_semaphore: 
+                    #add small delay 
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
+                    fetcher = PubMedFetcher()
                     self.logger.info(f'Sending PubMed Request with following params: PMID: {pmid}')
-                    result = await asyncio.to_thread(self.pubmed_fetcher.article_by_pmid, pmid)
+                    result = await asyncio.to_thread(fetcher.article_by_pmid, pmid)
                 return result 
             
-            except MetaPubError as e: 
-                self.logger.error(f"Caught MetaPubError: {str(e)}, attempt number: {retries + 1}")
-                retries += 1
-                if retries >= self.max_retries: 
-                    self.logger.error(f"Failed to retrieve article details for PMID: {pmid} after {self.max_retries} retries. Error: {str(e)}")
-                    return {"pmid": pmid, "error": str(e)}
-                await asyncio.sleep(2**retries)
-            except Exception as e: 
-                self.logger.error(f"Unexpected error: {str(e)}")
-                self.logger.error(f"Traceback:\n{traceback.format_exc()}")
-                return {"pmid": pmid, "error": f"Unexpected error: {str(e)}"}
+            except (MetaPubError, EutilsRequestError) as e:  
+                full_traceback = traceback.format_exc()
+                if 'Too Many Requests (429)' in full_traceback: 
+                    #check api key 
+                    fetcher_apikey = fetcher.qs.api_key
+                    self.logger.error(
+                        f"API rate limit exceeded for PMID {pmid}, "
+                        f"attempt {retries + 1}/{self.max_retries}, "
+                        f"API key status: {'Set' if fetcher_apikey else 'Not Set'}"
+                    )
+                    #do error handling ie: exponential backoff 
+                    retries += 1
+                    if retries >= self.max_retries:
+                        self.logger.error(f"Max retries reached for PMID {pmid} after rate limit errors")
+                        return {"pmid": pmid, "error": "Rate limit exceeded"}
+                    
+                    wait_time = min(2**retries, 60)
+                    await asyncio.sleep(wait_time)
 
-        
+            except (ConnectTimeout, RequestException, ConnectTimeoutError) as e:
+                # Handle connection timeout errors
+                full_traceback = traceback.format_exc()
+                self.logger.warning(f"Connection timeout for PMID {pmid}, attempt {retries + 1}: {str(e)}, Full traceback: {full_traceback}")
+                retries += 1
+                if retries >= self.max_retries:
+                    self.logger.error(f"Max retries reached for PMID {pmid} after timeout errors")
+                    return {"pmid": pmid, "error": "Connection timeout"}
+                
+                
+                wait_time = min(2**retries, 60)
+                self.logger.info(f"Retrying for PMID {pmid} in {wait_time} seconds")
+                await asyncio.sleep(wait_time)
+
+            except EutilsNCBIError as e:
+                self.logger.error(f"EutilsNCBIError for PMID {pmid}: {str(e)}")
+                self.logger.error(f"Traceback:\n{traceback.format_exc()}")
+                retries += 1
+                wait_time = min(2**retries, 60)
+                self.logger.warning(f"Retrying for PMID {pmid} in {wait_time} seconds")
+                await asyncio.sleep(wait_time)
+                if retries >= self.max_retries:
+                    self.logger.error(f"Max retries reached for PMID {pmid} after EutilsNCBIError")
+                    return {"pmid": pmid, "error": "EutilsNCBIError"}
+                
+            except Exception as e:
+                self.logger.error(f"Unexpected error for PMID {pmid}: {str(e)}")
+                self.logger.error(f"Traceback:\n{traceback.format_exc()}")
+                retries += 1
+                if retries >= self.max_retries:
+                    self.logger.error(f"Max retries reached for PMID {pmid} after unexpected error")
+                    return {"pmid": pmid, "error": "Unexpected error"}
     
     async def get_pubmed_article_details(self, pmid_list: List[str], batch_size: int = 1000): 
         '''
