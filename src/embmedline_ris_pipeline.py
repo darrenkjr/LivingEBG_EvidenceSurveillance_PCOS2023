@@ -11,6 +11,11 @@ class embmedline_ris_pipeline:
         self.database = database
         self.search_type = search_type
         self.logger = LoggerConfig.setup_logger(logger_name= f'{database}_{search_type}')
+        search_strategy_path = Path(__file__).parent / 'dataset' / 'ovid_kw_searches.xlsx'
+        self.overarching_search_strats = pd.read_excel(search_strategy_path, sheet_name = 'overarching')
+        topic_specific_embase = pd.read_excel(search_strategy_path, sheet_name = 'medline-topicspecific')
+        topic_specific_medline = pd.read_excel(search_strategy_path, sheet_name = 'embase-topicspecific')
+        self.topic_specific_strats = pd.concat([topic_specific_embase, topic_specific_medline], ignore_index=True)
 
     def ris_eval_pipeline(self): 
 

@@ -2,7 +2,7 @@ from pathlib import Path
 import pandas as pd 
 import rispy
 import pyarrow
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from datetime import datetime
 import re
 
@@ -17,6 +17,7 @@ class eval_metrics:
     f1_score: float
     f2_score: float
     f3_score: float
+    overall_screening_workload: int
 
 @dataclass
 class vectorsearch_eval_metrics: 
@@ -80,6 +81,18 @@ class search_evaluation:
         self.index_id_col = 'included_article_id'
         self.eval_groundtruth_df = self._load_eval_groundtruth()
         self.goldset_df = self._load_gold_set()
+        eval_groundtruth_df_oa = self.eval_groundtruth_df.query('retrieved_oa_id.notna()').copy()
+        eval_groundtruth_df_embase = self.eval_groundtruth_df.query('retrieved_embase_id.notna()').copy()
+        eval_groundtruth_df_pubmed = self.eval_groundtruth_df.query('retrieved_pubmed_id.notna()').copy()
+        eval_groundtruth_df_medline = self.eval_groundtruth_df.query('retrieved_pubmed_id.notna()').copy()
+        self.adjusted_groundtruth_df = {
+            'oa' : eval_groundtruth_df_oa, 
+            'embase' : eval_groundtruth_df_embase, 
+            'pubmed' : eval_groundtruth_df_pubmed, 
+            'medline' : eval_groundtruth_df_medline
+        }
+
+        self.metric_col = [field.name for field in fields(eval_metrics)]
 
         #default year rage limit to parse 
         self.start_year_cutoff = 1990
@@ -155,6 +168,14 @@ class search_evaluation:
     
     def _load_overarching_search_results(self): 
 
+        '''
+        Loads overarching search results from the search results path. 
+
+        Return: 
+            Nothing, writes Dataframe containing results from overarching search as parquet file to appropriate path,
+            Also stores results dataframe as an attribute 
+        '''
+
         self.logger.info('Loading search results...')
 
         #check if folder has files in it 
@@ -223,6 +244,16 @@ class search_evaluation:
 
     
     def _load_topic_specific_search_results(self): 
+        '''
+        Loads topic specific search results from the search results path. Cleans questions id, and implements relevant mappings 
+
+        Return: 
+            Nothing, writes Dataframe containing results from topic specific search as parquet file to appropriate path,
+            Also stores results dataframe as an attribute 
+        '''
+
+
+
         self.logger.info(f'Loading comparison set')
         comparison_set = self.eval_groundtruth_df.copy()
 
@@ -277,7 +308,14 @@ class search_evaluation:
 
     def process_search_results(self, results_df): 
         '''
-        Evaluates search results, saves matched and missed results, and returns evaluation metrics
+        Evaluates search results, saves matched and missed results, and returns evaluation metrics. Triages 
+        by overarching and topic specific search types. 
+
+        Args: 
+            results_df : Dataframe containing results from search 
+
+        Returns: 
+            evalmetrics_df : Dataframe containing evaluation metrics for search 
         
         '''
         results_df[self.result_id_col] = results_df[self.result_id_col].str.lower()
@@ -289,49 +327,210 @@ class search_evaluation:
         evalmetrics_df = pd.DataFrame()
         self.logger.info(f'Evaluating matches for {self.database} {self.search_type} {self.strategy_type} {self.vector_search_flag}')
 
-        match_results_df, missed_results_df = self._evaluate_matches(self.eval_groundtruth_df, results_df)
-
         #overall metrics 
-        self.question_id = 'overall'
-        metrics_groundtruth = self.calc_eval_metrics(match_results_df, self.eval_groundtruth_df, results_df)
-        metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
-        metrics_groundtruth_df['performance_on'] = 'newlyadded_2023edition'
-        metrics_groundtruth_df['question_id'] = self.question_id
-        evalmetrics_df = pd.concat([metrics_groundtruth_df], ignore_index=True)
-        #save matched and missed results 
-        evalmetrics_df['database'] = self.database
-        evalmetrics_df['search_type'] = self.search_type
-        evalmetrics_df['strategy_type'] = self.strategy_type
-        evalmetrics_df['vector_search'] = self.vector_search_flag
-        self._save_match_missed_results(match_results_df, missed_results_df)
+        if self.search_type == 'overarching': 
+            evalmetrics_df = self._process_overarching_results(results_df)
 
-
-        if self.search_type == 'topic_specific': 
-            grouped_evalmetrics_df = pd.DataFrame()
-            for question_id, grouped_groundtruth_df in self.eval_groundtruth_df.groupby('question_id'): 
-                self.question_id = question_id
-                grouped_df = results_df[results_df['question_id'] == question_id]
-                match_results_df, missed_results_df = self._evaluate_matches(grouped_groundtruth_df, grouped_df)
-                metrics_groundtruth = self.calc_eval_metrics(match_results_df, grouped_groundtruth_df, grouped_df)
-                metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
-                metrics_groundtruth_df['performance_on'] = 'newlyadded_2023edition'
-                metrics_groundtruth_df['question_id'] = question_id
-                metrics_groundtruth_df['database'] = self.database
-                metrics_groundtruth_df['search_type'] = self.search_type
-                metrics_groundtruth_df['strategy_type'] = self.strategy_type
-                metrics_groundtruth_df['vector_search'] = self.vector_search_flag
-                grouped_evalmetrics_df = pd.concat([grouped_evalmetrics_df, metrics_groundtruth_df], ignore_index=True)
-            
-                self._save_match_missed_results(match_results_df, missed_results_df)
-
-            evalmetrics_df = pd.concat([evalmetrics_df, grouped_evalmetrics_df], ignore_index=True)
-
+        elif self.search_type == 'topic_specific': 
+            evalmetrics_df = self._process_topic_specific_results(results_df)
+        
 
         first_few_cols = ['question_id', 'performance_on', 'database', 'search_type', 'strategy_type', 'vector_search']
         other_cols = [col for col in evalmetrics_df.columns if col not in first_few_cols]
-        evalmetrics_df = evalmetrics_df.reindex(columns=first_few_cols + other_cols)
+        return evalmetrics_df.reindex(columns=first_few_cols + other_cols)
+    
+    def _process_overarching_results(self, results_df): 
+        '''
+        Processes search strategies that are overarching by design. 
 
-        return evalmetrics_df      
+        Args: 
+            results_df : Dataframe containing results from overarching search 
+
+        Returns: 
+            evalmetrics_df : Dataframe containing evaluation metrics for overarching search 
+        '''
+        self.question_id = 'overall'
+        evalmetrics_df_raw, match_results_df, missed_results_df = self._evaluate_performance(self.eval_groundtruth_df, results_df, 'raw')
+        #handle adjusted ground truth as well 
+        evalmetrics_df_adjusted, match_results_df_adjusted, missed_results_df_adjusted = self._evaluate_performance(self.adjusted_groundtruth_df[self.database], results_df, 'adjusted')
+        evalmetrics_df_adjusted.columns = [f'{col}_adjusted' if col in self.metric_col else col for col in evalmetrics_df_adjusted.columns]
+        merged_eval = pd.merge(evalmetrics_df_raw, evalmetrics_df_adjusted, on = ['performance_on','question_id', 'database', 'search_type', 'strategy_type', 'vector_search'], how = 'outer')
+        evalmetrics_df = pd.concat([evalmetrics_df, merged_eval], ignore_index=True)
+        return evalmetrics_df
+    
+    def _process_topic_specific_results(self, results_df): 
+
+        '''
+        Processes search strategies that are topic specific by design. Evaluates at topic specific level, and at global level.
+
+        Args: 
+            results_df : Dataframe containing results from topic specific search 
+
+        Returns: 
+            evalmetrics_df : Dataframe containing evaluation metrics for topic specific search 
+        '''
+        evalmetrics_df = pd.DataFrame()
+        grouped_evalmetrics_df_raw = pd.DataFrame() 
+        grouped_evalmetrics_df_adjusted = pd.DataFrame() 
+        match_results_dct = {} 
+        question_id_list = list(self.eval_groundtruth_df['question_id'].unique())
+        for question_id, grouped_groundtruth_df in self.eval_groundtruth_df.groupby('question_id'): 
+            self.question_id = question_id
+            result_df_grouped = results_df.query('question_id == @question_id')
+            evalmetrics_df_raw, match_results_df, missed_results_df = self._evaluate_performance(grouped_groundtruth_df, result_df_grouped, 'raw')
+            grouped_evalmetrics_df_raw = pd.concat([grouped_evalmetrics_df_raw , evalmetrics_df_raw], ignore_index=True)
+            match_results_dct[question_id] = match_results_df
+        for question_id, grouped_groundtruth_df_adjusted in self.adjusted_groundtruth_df[self.database].groupby('question_id'): 
+            self.question_id = question_id
+            result_df_grouped = results_df.query('question_id == @question_id')
+            evalmetrics_df_adjusted, match_results_df_adjusted, missed_results_df_adjusted = self._evaluate_performance(grouped_groundtruth_df_adjusted,result_df_grouped, 'adjusted')
+            
+            evalmetrics_df_adjusted.columns = [f'{col}_adjusted' if col in self.metric_col else col for col in evalmetrics_df_adjusted.columns]
+            grouped_evalmetrics_df_adjusted = pd.concat([grouped_evalmetrics_df_adjusted, evalmetrics_df_adjusted], ignore_index=True)
+            match_results_dct[f'{question_id}_adjusted'] = match_results_df_adjusted
+
+        #check if all question ids are present in the eval metrics df 
+        # Find which question IDs are missing from the adjusted metrics
+        processed_question_ids = grouped_evalmetrics_df_adjusted['question_id'].unique()
+        missing_question_ids = set(question_id_list) - set(processed_question_ids)
+        
+        # Add mock evaluations for missing question IDs
+        for question_id in missing_question_ids:
+            self.question_id = question_id
+            result_df_grouped = results_df.query('question_id == @question_id')
+            
+            # Create empty dataframe with appropriate column structure for this question_id
+            empty_comparison_df = pd.DataFrame(columns=self.adjusted_groundtruth_df[self.database].columns)
+            
+            # Use your existing _evaluate_performance method which already handles empty comparison sets
+            evalmetrics_df_adjusted, match_results_df_adjusted, missed_results_df_adjusted = self._evaluate_performance(
+                empty_comparison_df, result_df_grouped, 'adjusted'
+            )
+            
+            evalmetrics_df_adjusted.columns = [f'{col}_adjusted' if col in self.metric_col else col for col in evalmetrics_df_adjusted.columns]
+            grouped_evalmetrics_df_adjusted = pd.concat([grouped_evalmetrics_df_adjusted, evalmetrics_df_adjusted], ignore_index=True)
+            match_results_dct[f'{question_id}_adjusted'] = match_results_df_adjusted
+
+        merged_eval = pd.merge(grouped_evalmetrics_df_raw, grouped_evalmetrics_df_adjusted, on = ['performance_on','question_id', 'database', 'search_type', 'strategy_type', 'vector_search'], how = 'outer')
+        evalmetrics_df = pd.concat([evalmetrics_df, merged_eval], ignore_index=True)
+        #evaluate overall 
+        consolidated_matches_raw = pd.DataFrame()
+        consolidated_matches_adjusted = pd.DataFrame()
+        for question_id, match_results_df in match_results_dct.items(): 
+            if '_adjusted' in question_id: 
+                consolidated_matches_adjusted = pd.concat([consolidated_matches_adjusted, match_results_df], ignore_index=True)
+            else: 
+                consolidated_matches_raw = pd.concat([consolidated_matches_raw, match_results_df], ignore_index=True)
+
+        self.question_id = 'overall'
+        metrics_groundtruth_raw, metrics_groundtruth_adjusted = self._evaluate_overall_topic_specific_results(grouped_evalmetrics_df_raw, grouped_evalmetrics_df_adjusted)
+        merged_overall_eval = pd.merge(metrics_groundtruth_raw, metrics_groundtruth_adjusted, on = ['performance_on', 'question_id', 'database', 'search_type', 'strategy_type', 'vector_search'], how = 'outer')
+        evalmetrics_df = pd.concat([evalmetrics_df, merged_overall_eval], ignore_index=True)
+        return evalmetrics_df
+    
+    def _evaluate_overall_topic_specific_results(self, grouped_evalmetrics_df_raw, grouped_evalmetrics_df_adjusted): 
+        """
+        Calculate overall metrics by aggregating results from topic-specific evaluations.
+        This prevents cross-contamination between topics by using pre-calculated metrics.
+        
+        Args:
+            grouped_evalmetrics_df_raw: DataFrame containing raw metrics for each topic
+            grouped_evalmetrics_df_adjusted: DataFrame containing adjusted metrics for each topic
+            
+        Returns:
+            tuple: (metrics_groundtruth_df_raw, metrics_groundtruth_df_adjusted) - DataFrames with overall metrics
+        """
+        self.question_id = 'overall'
+        
+        # Extract the raw metrics
+        total_retrieved_raw = grouped_evalmetrics_df_raw['n_retrieved'].sum()
+        total_missed_raw = grouped_evalmetrics_df_raw['n_missed'].sum()
+        total_groundtruth_raw = total_retrieved_raw + total_missed_raw
+        total_results_raw = grouped_evalmetrics_df_raw['overall_screening_workload'].sum()
+        
+        # Calculate overall metrics
+        overall_recall_raw = total_retrieved_raw / total_groundtruth_raw if total_groundtruth_raw > 0 else 0
+        overall_precision_raw = total_retrieved_raw / total_results_raw if total_results_raw > 0 else 0
+        overall_nnr_raw = 1 / overall_precision_raw if overall_precision_raw > 0 else float('inf')
+        overall_f1_raw = self._calc_fscore(overall_precision_raw, overall_recall_raw, 1)
+        overall_f2_raw = self._calc_fscore(overall_precision_raw, overall_recall_raw, 2)
+        overall_f3_raw = self._calc_fscore(overall_precision_raw, overall_recall_raw, 3)
+        
+        # Create overall metrics dataframe for raw
+        metrics_groundtruth_raw = eval_metrics(
+            nnr=overall_nnr_raw,
+            n_retrieved=total_retrieved_raw,
+            n_missed=total_missed_raw,
+            recall=overall_recall_raw,
+            precision=overall_precision_raw,
+            f1_score=overall_f1_raw,
+            f2_score=overall_f2_raw,
+            f3_score=overall_f3_raw,
+            overall_screening_workload=total_results_raw
+        )
+        
+        # Do the same for adjusted metrics
+        total_retrieved_adjusted = grouped_evalmetrics_df_adjusted['n_retrieved_adjusted'].sum()
+        total_missed_adjusted = grouped_evalmetrics_df_adjusted['n_missed_adjusted'].sum()
+        total_groundtruth_adjusted = total_retrieved_adjusted + total_missed_adjusted
+        total_results_adjusted = grouped_evalmetrics_df_adjusted['overall_screening_workload_adjusted'].sum()
+        
+        overall_recall_adjusted = total_retrieved_adjusted / total_groundtruth_adjusted if total_groundtruth_adjusted > 0 else 0
+        overall_precision_adjusted = total_retrieved_adjusted / total_results_adjusted if total_results_adjusted > 0 else 0
+        overall_nnr_adjusted = 1 / overall_precision_adjusted if overall_precision_adjusted > 0 else float('inf')
+        overall_f1_adjusted = self._calc_fscore(overall_precision_adjusted, overall_recall_adjusted, 1)
+        overall_f2_adjusted = self._calc_fscore(overall_precision_adjusted, overall_recall_adjusted, 2)
+        overall_f3_adjusted = self._calc_fscore(overall_precision_adjusted, overall_recall_adjusted, 3)
+        
+        metrics_groundtruth_adjusted = eval_metrics(
+            nnr=overall_nnr_adjusted,
+            n_retrieved=total_retrieved_adjusted,
+            n_missed=total_missed_adjusted,
+            recall=overall_recall_adjusted,
+            precision=overall_precision_adjusted,
+            f1_score=overall_f1_adjusted,
+            f2_score=overall_f2_adjusted,
+            f3_score=overall_f3_adjusted,
+            overall_screening_workload=total_results_adjusted
+        )
+        
+        # Create dataframes and add metadata
+        metrics_groundtruth_df_raw = pd.DataFrame.from_records([asdict(metrics_groundtruth_raw)])
+        metrics_groundtruth_df_raw['performance_on'] = 'newlyadded_2023edition'
+        metrics_groundtruth_df_raw['question_id'] = 'overall'
+        metrics_groundtruth_df_raw['database'] = self.database
+        metrics_groundtruth_df_raw['search_type'] = self.search_type
+        metrics_groundtruth_df_raw['strategy_type'] = self.strategy_type
+        metrics_groundtruth_df_raw['vector_search'] = self.vector_search_flag
+        
+        metrics_groundtruth_df_adjusted = pd.DataFrame.from_records([asdict(metrics_groundtruth_adjusted)])
+        metrics_groundtruth_df_adjusted.columns = [f'{col}_adjusted' if col in self.metric_col else col for col in metrics_groundtruth_df_adjusted.columns]
+        metrics_groundtruth_df_adjusted['performance_on'] = 'newlyadded_2023edition'
+        metrics_groundtruth_df_adjusted['question_id'] = 'overall'
+        metrics_groundtruth_df_adjusted['database'] = self.database
+        metrics_groundtruth_df_adjusted['search_type'] = self.search_type
+        metrics_groundtruth_df_adjusted['strategy_type'] = self.strategy_type
+        metrics_groundtruth_df_adjusted['vector_search'] = self.vector_search_flag
+        
+        return metrics_groundtruth_df_raw, metrics_groundtruth_df_adjusted
+
+
+    def _evaluate_performance(self, comparison_df: pd.DataFrame, results_df: pd.DataFrame, raw_adjusted_flag:str):
+         
+            match_results_df, missed_results_df = self._evaluate_matches(comparison_df, results_df)
+            self._save_match_missed_results(match_results_df, missed_results_df, raw_adjusted_flag)
+            metrics_groundtruth = self.calc_eval_metrics(match_results_df, comparison_df, results_df)
+            metrics_groundtruth_df = pd.DataFrame.from_records([asdict(metrics_groundtruth)])
+            metrics_groundtruth_df['performance_on'] = 'newlyadded_2023edition'
+            metrics_groundtruth_df['question_id'] = self.question_id
+            evalmetrics_df = pd.concat([metrics_groundtruth_df], ignore_index=True)
+            #save matched and missed results 
+            evalmetrics_df['database'] = self.database
+            evalmetrics_df['search_type'] = self.search_type
+            evalmetrics_df['strategy_type'] = self.strategy_type
+            evalmetrics_df['vector_search'] = self.vector_search_flag
+            return evalmetrics_df, match_results_df, missed_results_df
+
 
         
     def _evaluate_matches(self, comparison_df: pd.DataFrame, results_df: pd.DataFrame): 
@@ -395,9 +594,17 @@ class search_evaluation:
         
 
         #check length of match df 
-        if len(match_df) == 0: 
+        if len(match_df) == 0:
             self.logger.warning(f'No matches found for {self.question_id}')
-            return eval_metrics(nnr = 0, n_retrieved = 0, n_missed = len(comparison_df), recall = 0, precision = 0, f1_score = 0, f2_score = 0, f3_score = 0)
+            return eval_metrics(nnr = 0, n_retrieved = 0, n_missed = len(comparison_df), recall = 0, precision = 0, f1_score = 0, f2_score = 0, f3_score = 0, overall_screening_workload = len(raw_results_df))
+        if len(comparison_df) == 0:
+            # No articles to find in this database (not indexed)
+            self.logger.warning(f'No articles in comparison set for {self.question_id} - likely not indexed in this database')
+            return eval_metrics(nnr = float('inf'), n_retrieved = 0, n_missed = 0, 
+                               recall = float('nan'), precision = float('nan'), 
+                               f1_score = float('nan'), f2_score = float('nan'), 
+                               f3_score = float('nan'), 
+                               overall_screening_workload = len(raw_results_df))
         
         recall = len(match_df) / len(comparison_df)
         precision = len(match_df) / len(raw_results_df)
@@ -407,6 +614,7 @@ class search_evaluation:
         f1 = self._calc_fscore(precision, recall, 1)
         f2 = self._calc_fscore(precision, recall, 2)
         f3 = self._calc_fscore(precision, recall, 3)
+        overall_screening_workload = len(raw_results_df)
 
         self.logger.info(f'Results for {self.database}, search type {self.search_type}, strategy type {self.strategy_type}, vector search: {self.vector_search_flag}:')
         self.logger.info(f'Number needed to read: {nnr}')
@@ -415,8 +623,9 @@ class search_evaluation:
         self.logger.info(f'F1 score: {f1}')
         self.logger.info(f'F2 score: {f2}')
         self.logger.info(f'F3 score: {f3}')
-
-        return eval_metrics(nnr, n_retrieved, n_missed, recall, precision, f1, f2, f3)
+        self.logger.info(f'Overall screening workload: {overall_screening_workload}')
+        assert n_retrieved + n_missed == len(comparison_df), f'Total number of results retrieved and missed does not match total number of results in comparison set'
+        return eval_metrics(nnr, n_retrieved, n_missed, recall, precision, f1, f2, f3, overall_screening_workload)
     
     def _evaluate_vs_matches(self, evaluation_df : pd.DataFrame, rrf_sim_result_df : pd.DataFrame, database_name : str) -> pd.DataFrame: 
 
@@ -589,16 +798,16 @@ class search_evaluation:
             self.logger.error(f'Error saving evaluation results: {e}')
             raise
 
-    def _save_match_missed_results(self, match_results_df: pd.DataFrame, missed_results_df: pd.DataFrame):
+    def _save_match_missed_results(self, match_results_df: pd.DataFrame, missed_results_df: pd.DataFrame, raw_adjusted_flag:str):
 
         if self.search_type == 'overarching': 
-            match_results_df.to_parquet(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
-            missed_results_df.to_parquet(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.parquet')
+            match_results_df.to_parquet(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}_{raw_adjusted_flag}.parquet')
+            missed_results_df.to_parquet(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}_{raw_adjusted_flag}.parquet')
 
             #also save as csv for troubleshooting (missed reuslts only)
-            missed_results_df.to_csv(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
+            missed_results_df.to_csv(self.save_eval_missed_results_path / f'missed_results_{self.database}_{self.search_type}_{self.strategy_type}_{raw_adjusted_flag}.csv')
             #matched results to csv 
-            match_results_df.to_csv(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}.csv')
+            match_results_df.to_csv(self.save_eval_path / f'matched_results_{self.database}_{self.search_type}_{self.strategy_type}_{raw_adjusted_flag}.csv')
         
         elif self.search_type == 'topic_specific': 
             #grab question_id from match_results_df
@@ -615,10 +824,10 @@ class search_evaluation:
             #create directory if it doesn't exist
             self.logger.info(f'Saving results for question_id: {question_id}')
             (self.save_eval_missed_results_path / f'question_{question_id}').mkdir(parents=True, exist_ok=True)
-            match_results_df.to_parquet(self.save_eval_path / f'question_{question_id}' / f'matched_results_{self.database}_{question_id}.parquet')
-            missed_results_df.to_parquet(self.save_eval_missed_results_path / f'question_{question_id}' / f'missed_results_{self.database}_{question_id}.parquet')
-            match_results_df.to_csv(self.save_eval_path / f'question_{question_id}' / f'matched_results_{self.database}_{question_id}.csv')
-            missed_results_df.to_csv(self.save_eval_missed_results_path / f'question_{question_id}' / f'missed_results_{self.database}_{question_id}.csv')
+            match_results_df.to_parquet(self.save_eval_path / f'question_{question_id}' / f'matched_results_{self.database}_{question_id}_{raw_adjusted_flag}.parquet')
+            missed_results_df.to_parquet(self.save_eval_missed_results_path / f'question_{question_id}' / f'missed_results_{self.database}_{question_id}_{raw_adjusted_flag}.parquet')
+            match_results_df.to_csv(self.save_eval_path / f'question_{question_id}' / f'matched_results_{self.database}_{question_id}_{raw_adjusted_flag}.csv')
+            missed_results_df.to_csv(self.save_eval_missed_results_path / f'question_{question_id}' / f'missed_results_{self.database}_{question_id}_{raw_adjusted_flag}.csv')
 
 
     def run_eval_pipeline(self): 

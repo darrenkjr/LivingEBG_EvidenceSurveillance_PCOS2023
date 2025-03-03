@@ -36,7 +36,7 @@ class sql_data_migration:
                 self.logger.error(f"Error connecting to database: {e}")
     
 
-        self.gdg_data_path = Path(__file__).parent.parent / 'dataset' / '_superseded' / 'PCOS_Guideline_Dataset_checked.xlsm'
+        self.gdg_data_path = Path(__file__).parent.parent / 'dataset' / '_superseded' / 'PCOS_Guideline_Dataset.xlsm'
         self.ground_truth_data_path = Path(__file__).parent.parent / 'dataset' / 'fullgroundtruth_valid_apimerge_df.parquet'
         
         self.database_mapping = {

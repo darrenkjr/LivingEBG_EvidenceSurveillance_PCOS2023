@@ -20,7 +20,6 @@ def main():
         evalmetrics_df = embmedline_ris_pipeline_cls.ris_eval_pipeline()
         total_evalmetrics_df = pd.concat([total_evalmetrics_df, evalmetrics_df], ignore_index=True)
 
-
     sheet_name = 'topic_specific_no_vs'
     excel_path = eval_results_path / 'overall_evalmetrics_df.xlsx'
     if excel_path.exists():

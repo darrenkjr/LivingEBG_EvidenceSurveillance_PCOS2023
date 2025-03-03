@@ -33,10 +33,11 @@ class oa_keywordsearch_dev:
                          '("polycystic" AND "ovary")',
                          '("poly-cystic" AND "ovarian")',
                          '("poly-cystic" AND "ovary")',
-                         '"stein-leventhal"',
+                         '"leventhal"',
                          '"oligo-ovulation"',
                          '"oligoovulation"',
-                         '"anovulation"'] 
+                         '"anovulation"', 
+                         '"hyperandrogen"'] 
         
         try: 
             #examine existing files if topics have already been retrieved 

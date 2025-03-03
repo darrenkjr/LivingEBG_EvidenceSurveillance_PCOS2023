@@ -19,15 +19,9 @@ def main():
     eval_results_path.mkdir(parents=True, exist_ok=True)
 
     pubmed_overarching_search_cls = pubmed_overarching_search()
-    pubmed_query = '(Polycystic Ovary Syndrome[mh] OR "polycystic ovar*"[tiab] OR "poly-cystic ovar*"[tiab] OR PCOS[tiab] OR PCOD[tiab] OR leventhal[tiab] OR Anovulation[mh] OR anovulat*[tiab] OR oligo-ovulat*[tiab] OR oligoovulat*[tiab] OR (ovar*[tiab] AND (sclerocystic[tiab] OR polycystic[tiab] OR poly-cystic[tiab] OR degenerate*[tiab] OR hyperandrogen*[tiab] OR hyperandrogen*[tiab]))) NOT (Animals[mh] NOT Humans[mh])'
+    pubmed_query = '(Polycystic Ovary Syndrome[mh] OR "polycystic ovar*"[tiab] OR "poly-cystic ovar*"[tiab] OR PCOS[tiab] OR PCOD[tiab] OR leventhal[tiab] OR Anovulation[mh] OR anovulat*[tiab] OR oligo-ovulat*[tiab] OR oligoovulat*[tiab] OR (ovar*[tiab] AND (sclerocystic[tiab] OR polycystic[tiab] OR poly-cystic[tiab] OR degenerate*[tiab] OR hyperandrogen*[tiab] OR hyper androgen*[tiab]))) NOT (Animals[mh] NOT Humans[mh])'
     evalmetrics_df = asyncio.run(pubmed_overarching_search_cls.pubmed_ovarching_search_eval_pipeline(pubmed_query))
     total_evalmetrics_df = pd.concat([total_evalmetrics_df, evalmetrics_df], ignore_index=True)
-    
-    #openalex overarching, topic 
-    openalex_overarching_search_cls = oa_overarching_search()
-    evalmetrics_df = asyncio.run(openalex_overarching_search_cls.oa_overarching_search_eval_pipeline())
-    total_evalmetrics_df = pd.concat([total_evalmetrics_df, evalmetrics_df], ignore_index=True)
-
     
     #openalex keyword search 
     oa_keywordsearch_cls = oa_keywordsearch_dev()

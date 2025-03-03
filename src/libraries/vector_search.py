@@ -206,7 +206,7 @@ class vector_search_implementation():
             #ranked results output 
             rrf_sim_result_df = self.sql_procedures.rrf_combine_results(searchstrat_id = searchstrat_id, evidence_review_id = evidence_review_id, original_searchstrat_id = original_searchstrat_id)
             #conduct evaluation 
-            eval_metrics_df, result_cutoff_df = self._evaluate_vector_search(rrf_sim_result_df, evidence_review_id = evidence_review_id, search_strat_id = searchstrat_id,  search_type = 'overarching', vectorsearch_type = vs_type)
+            eval_metrics_df, result_cutoff_df, result_cutoff_df_adjusted = self._evaluate_vector_search(rrf_sim_result_df, evidence_review_id = evidence_review_id, search_strat_id = searchstrat_id,  search_type = 'overarching', vectorsearch_type = vs_type)
             eval_metrics_df_list.append(eval_metrics_df)
         
         eval_metrics_df_all = pd.concat(eval_metrics_df_list)
@@ -265,7 +265,7 @@ class vector_search_implementation():
                 original_searchstrat_id = original_searchstrat_id, 
                 )
             #conduct evaluation 
-            eval_metrics_df, result_cutoff_df = self._evaluate_vector_search(
+            eval_metrics_df, result_cutoff_df, result_cutoff_df_adjusted = self._evaluate_vector_search(
                 rrf_sim_result_df, 
                 evidence_review_id = evidence_review_id, 
                 search_strat_id = searchstrat_id,  
@@ -283,7 +283,9 @@ class vector_search_implementation():
         '''
 
         self.logger.info(f'Retrieving evaluation set for evidence review id {evidence_review_id}')
+        #this is raw evaluation set 
         evaluation_set_df = self.sql_procedures.retrieve_evaluation_set(evidence_review_id = evidence_review_id)
+        evaluation_set_df_adjusted = evaluation_set_df.query(f"retrieved_{self.database}_id.notna()").copy()
         #retrieve database name from database reference table givne search start id and database id 
         with self.engine.begin() as conn: 
             database_name = conn.execute(text(
@@ -310,8 +312,10 @@ class vector_search_implementation():
             query_vector_df = pd.DataFrame({'ground_truth_article_id': []})
 
         eval_metrics_df, cutoff_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df)
+        eval_metrics_df_adjusted, cutoff_df_adjusted = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df_adjusted, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df)
+        eval_metrics_merged = pd.merge(eval_metrics_df, eval_metrics_df_adjusted, on = ['search_strategy_id', 'evidence_review_id', 'database', 'search_type', 'vector_search'], how = 'outer')
         self.logger.info(f'Vector search evaluation pipeline complete')
-        return eval_metrics_df, cutoff_df
+        return eval_metrics_merged, cutoff_df, cutoff_df_adjusted
     
     def _check_embeddings_exist(self): 
         """Check embedding tables and determine which need regeneration"""
