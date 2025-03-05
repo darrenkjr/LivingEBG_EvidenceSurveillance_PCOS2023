@@ -140,7 +140,7 @@ class vector_search_implementation():
 
         #retrieve all search result articles associated with a database 
         with self.engine.connect() as conn: 
-                database_name = conn.execute(text(f"SELECT database_name FROM databases WHERE database_id = {database}")).scalar()
+            database_name = conn.execute(text(f"SELECT database_name FROM databases WHERE database_id = {database}")).scalar()
 
         self.logger.info(f'Retrieving search result articles for database {database_name}')
         search_result_articles_df = self.sql_procedures.retrieve_search_result_articles_databaseview(database_id = database)
@@ -285,7 +285,7 @@ class vector_search_implementation():
         self.logger.info(f'Retrieving evaluation set for evidence review id {evidence_review_id}')
         #this is raw evaluation set 
         evaluation_set_df = self.sql_procedures.retrieve_evaluation_set(evidence_review_id = evidence_review_id)
-        evaluation_set_df_adjusted = evaluation_set_df.query(f"retrieved_{self.database}_id.notna()").copy()
+        
         #retrieve database name from database reference table givne search start id and database id 
         with self.engine.begin() as conn: 
             database_name = conn.execute(text(
@@ -296,6 +296,15 @@ class vector_search_implementation():
                 WHERE ss.search_strategy_id = :search_strat_id
                 """
             ), {'search_strat_id': search_strat_id}).scalar()
+        
+        if database_name == 'openalex': 
+            _database_name = 'oa'
+        elif database_name == 'medline': 
+            _database_name = 'pubmed'
+        else: 
+            _database_name = database_name
+
+        evaluation_set_df_adjusted = evaluation_set_df.query(f"retrieved_{_database_name}_id.notna()").copy()
 
         self.logger.info(f'Retrieving query goldset for evidence review id: {evidence_review_id}')
         eval_cls = search_evaluation(database = database_name, search_type = search_type, vector_search = True, logger = self.logger)
@@ -311,9 +320,13 @@ class vector_search_implementation():
         else: 
             query_vector_df = pd.DataFrame({'ground_truth_article_id': []})
 
-        eval_metrics_df, cutoff_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df)
-        eval_metrics_df_adjusted, cutoff_df_adjusted = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df_adjusted, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df)
-        eval_metrics_merged = pd.merge(eval_metrics_df, eval_metrics_df_adjusted, on = ['search_strategy_id', 'evidence_review_id', 'database', 'search_type', 'vector_search'], how = 'outer')
+        raw_adjusted_flag = 'raw'
+        eval_metrics_df, cutoff_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df, raw_adjusted_flag = raw_adjusted_flag)
+        raw_adjusted_flag = 'adjusted'
+        eval_metrics_df_adjusted, cutoff_df_adjusted = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df_adjusted, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df, raw_adjusted_flag = raw_adjusted_flag)
+        
+        
+        eval_metrics_merged = pd.merge(eval_metrics_df, eval_metrics_df_adjusted, on = ['database', 'search_type', 'search_strategy', 'vector_search_type', 'search_strategy_id', 'evidence_review_id'], how = 'outer')
         self.logger.info(f'Vector search evaluation pipeline complete')
         return eval_metrics_merged, cutoff_df, cutoff_df_adjusted
     
@@ -387,7 +400,7 @@ class vector_search_implementation():
                         self.logger.info(f"{info['desc']} embeddings are valid, length of embeddings table is equal to expected number of rows, and there are no null values in the embeddings table")
                         self.logger.info(f"Total rows: {stats['total']}, Valid rows (non-null embeddings): {stats['valid']}, Expected rows: {stats['expected']}")
             except Exception as e:
-                self.logger.error(f"Error checking {table_name}: {str(e)}")
+                self.logger.warning(f"Error checking {table_name}: {str(e)}")
                 tables_to_regenerate.append(table_name)
         
         return tables_to_regenerate, embedding_stats
@@ -417,7 +430,8 @@ class vector_search_implementation():
                 self.generate_goldset_embeddings()
                 
             if any('searchspace_database' in table for table in tables_to_regenerate):
-                for table in tables_to_regenerate: 
+                tables_searchspace = [table for table in tables_to_regenerate if 'searchspace_database' in table]
+                for table in tables_searchspace: 
                     for database in [1, 2, 3, 4]: 
                         self.sql_procedures.setup_searchspace_database_embedding_table(database_id = database)
                     database_name = table.split('_')[2]

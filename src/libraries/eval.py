@@ -39,6 +39,7 @@ class vectorsearch_eval_metrics:
     similarity_threshold_cutoff: float
     mrr: float
     mrr_new_relevant: float
+    overall_screening_workload: int
 
 
 
@@ -93,6 +94,7 @@ class search_evaluation:
         }
 
         self.metric_col = [field.name for field in fields(eval_metrics)]
+        self.metric_col_vs = [field.name for field in fields(vectorsearch_eval_metrics)]
 
         #default year rage limit to parse 
         self.start_year_cutoff = 1990
@@ -350,6 +352,7 @@ class search_evaluation:
             evalmetrics_df : Dataframe containing evaluation metrics for overarching search 
         '''
         self.question_id = 'overall'
+        evalmetrics_df = pd.DataFrame()
         evalmetrics_df_raw, match_results_df, missed_results_df = self._evaluate_performance(self.eval_groundtruth_df, results_df, 'raw')
         #handle adjusted ground truth as well 
         evalmetrics_df_adjusted, match_results_df_adjusted, missed_results_df_adjusted = self._evaluate_performance(self.adjusted_groundtruth_df[self.database], results_df, 'adjusted')
@@ -679,11 +682,11 @@ class search_evaluation:
                 recall= 0, precision= 0, precision_cutoff= 0, 
                 f1_score= 0, f2_score= 0, f3_score= 0, 
                 recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, 
-                similarity_threshold_cutoff= 0), pd.DataFrame()
+                similarity_threshold_cutoff= 0, overall_screening_workload = len(raw_results_df)), pd.DataFrame()
 
         elif len(comparison_df) > 0: 
                         
-            #dedupe results df, and make sure that it is sorted by ranking 
+            
             raw_results_df_dedupe = raw_results_df.sort_values('combined_rank_rrf').copy()
             #evaluate matches 
             matches = self._evaluate_vs_matches(comparison_df, raw_results_df_dedupe, self.database)
@@ -733,6 +736,7 @@ class search_evaluation:
                 assert recall_cutoff == recall 
                  #check recall for the trimmed results 
                 recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
+                overall_screening_workload = len(result_cutoff_df)
 
             elif len(matches) == 0: 
                 self.logger.warning(f'No matches found for current evidence_review_id. Returning 0 recall.')
@@ -742,7 +746,7 @@ class search_evaluation:
                     recall= 0, precision= 0, precision_cutoff= 0, 
                     f1_score= 0, f2_score= 0, f3_score= 0, 
                     recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, 
-                    similarity_threshold_cutoff= 0, mrr_new_relevant= 0, mrr= 0, rank_first_relevant= 0), pd.DataFrame()
+                    similarity_threshold_cutoff= 0, mrr_new_relevant= 0, mrr= 0, rank_first_relevant= 0, overall_screening_workload = len(raw_results_df)), pd.DataFrame()
                 
 
             assert (0 <= recall) and (recall <= 1), f'Recall is {recall}, which is not a valid recall value'
@@ -763,10 +767,8 @@ class search_evaluation:
             self.logger.info(f'Recall at first 10: {recall_at_10}')
             self.logger.info(f'Recall at first 100: {recall_at_100}')
             self.logger.info(f'Recall at first 1000: {recall_at_1000}')
-            
-            
 
-            return vectorsearch_eval_metrics(nnr_raw= nnr_raw, rank_new_relevant= rank_new_relevant, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, precision_cutoff= precision_cutoff, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff, mrr_new_relevant= mrr_new_relevant, mrr= mrr, rank_first_relevant= rank_first_relevant), result_cutoff_df
+            return vectorsearch_eval_metrics(nnr_raw= nnr_raw, rank_new_relevant= rank_new_relevant, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, precision_cutoff= precision_cutoff, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff, mrr_new_relevant= mrr_new_relevant, mrr= mrr, rank_first_relevant= rank_first_relevant, overall_screening_workload = overall_screening_workload), result_cutoff_df
         
     
     def _calc_fscore(self, precision: float, recall: float, beta: float = 1) -> float: 
@@ -841,23 +843,37 @@ class search_evaluation:
             
             return self.process_search_results(result_df)
 
-    def run_vectorsearch_eval_pipeline(self, result_set: pd.DataFrame, evaluation_set: pd.DataFrame, query_vector_df: pd.DataFrame, database_name: str, search_strat_df : pd.DataFrame): 
+    def run_vectorsearch_eval_pipeline(self, result_set: pd.DataFrame, evaluation_set: pd.DataFrame, query_vector_df: pd.DataFrame, database_name: str, search_strat_df : pd.DataFrame, raw_adjusted_flag: str): 
+       
         if len(evaluation_set) == 0: 
             self.logger.warning(f'No evaluation set found for current evidence_review_id. REturning empty results. Potential cause is due to no new articles included for current evidence_review_id. Verify this is intended.')
-            return pd.DataFrame(), pd.DataFrame()
+            placeholder_result_cutoff_df = pd.DataFrame()
+            placeholder_vector_search_metrics_df = pd.DataFrame()
+            placeholder_vector_search_metrics_df['database'] = database_name
+            placeholder_vector_search_metrics_df['search_type'] = search_strat_df['search_type_id']
+            placeholder_vector_search_metrics_df['search_strategy'] = search_strat_df['search_strategy_type_id']
+            placeholder_vector_search_metrics_df['vector_search_type'] = search_strat_df['vector_search']
+            placeholder_vector_search_metrics_df['search_strategy_id'] = search_strat_df['search_strategy_id']
+            placeholder_vector_search_metrics_df['evidence_review_id'] = search_strat_df['evidence_review_id']
+            
+            return placeholder_vector_search_metrics_df, placeholder_result_cutoff_df
+        
         elif len(evaluation_set) > 0: 
             vector_search_metrics, result_cutoff_df = self.calc_vectorsearch_metrics(comparison_df = evaluation_set, raw_results_df = result_set, query_vector_df = query_vector_df)
             vector_search_metrics_df = pd.DataFrame.from_records([asdict(vector_search_metrics)])
-            
+            if raw_adjusted_flag == 'adjusted':
+                vector_search_metrics_df.columns = [f'{col}_adjusted' for col in vector_search_metrics_df.columns if col in self.metric_col_vs]
             #add metadata 
             vector_search_metrics_df['database'] = database_name
             vector_search_metrics_df['search_type'] = search_strat_df['search_type_id']
             vector_search_metrics_df['search_strategy'] = search_strat_df['search_strategy_type_id']
             vector_search_metrics_df['vector_search_type'] = search_strat_df['vector_search']
-            vector_search_metrics_df['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M')
             vector_search_metrics_df['search_strategy_id'] = search_strat_df['search_strategy_id']
             vector_search_metrics_df['evidence_review_id'] = search_strat_df['evidence_review_id']
+
+           
             return vector_search_metrics_df, result_cutoff_df
+        
 
 
 

@@ -203,8 +203,8 @@ class OpenAlexClient:
         all_results_df['abstract'] = None  # Initialize abstract column with None values
         if mask.any():  # Only process if there are any non-null abstracts
             abstracts = all_results_df.loc[mask, 'abstract_inverted_index'].map(
-                lambda x: ' '.join(k for k, _ in sorted(
-                    [(word, pos[0]) for word, pos in x.items() for _ in pos],
+                lambda x: ' '.join(k for k, v in sorted(
+                    [(word, position) for word, positions in x.items() for position in positions],
                     key=lambda x: x[1]
                 ))
             )

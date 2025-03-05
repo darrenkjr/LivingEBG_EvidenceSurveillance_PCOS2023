@@ -1,4 +1,6 @@
 -- 1st Level Tables 
+-- Set the default schema
+SET search_path TO public;
 
 CREATE TABLE gdgs (
     gdg_id INT PRIMARY KEY, 

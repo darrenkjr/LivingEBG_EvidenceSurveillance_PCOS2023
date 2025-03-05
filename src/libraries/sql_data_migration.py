@@ -79,6 +79,20 @@ class sql_data_migration:
             'evaluation_results' : 0
         }
 
+        searchstrat_documentation_path = Path(__file__).parent.parent / 'dataset' / 'ovid_kw_searches.xlsx'
+        embase_topic_searchstrat = pd.read_excel(searchstrat_documentation_path, sheet_name = 'embase-topicspecific')
+        medline_topic_searchstrat = pd.read_excel(searchstrat_documentation_path, sheet_name = 'medline-topicspecific')
+        embase_expected_result_num = embase_topic_searchstrat.groupby('question')['results'].last()
+        medline_expected_result_num = medline_topic_searchstrat.groupby('question')['results'].last()
+
+        self.expected_topicspecific_kw_num = {
+            'embase' : embase_expected_result_num, 
+            'medline' : medline_expected_result_num
+        }
+
+
+
+
     def _create_database(self):
         """Create database if it doesn't exist using pure SQLAlchemy"""
         try:
@@ -255,7 +269,12 @@ class sql_data_migration:
     def migrate_ground_truth_data(self):
         _ = pd.read_parquet(self.ground_truth_data_path)
         _df = _.copy().reset_index()
-        
+
+        #clean question id 
+        _df['question_id'] = _df['question_id'].str.strip()
+        _df['question_id'] = _df['question_id'].str.replace(' ', '')
+        _df['question_id'] = _df['question_id'].str.replace('/', ',')
+
 
         ground_truth_df = _df[['included_article_id', 'question_id', 'included_reference', 'author_year_format', 'year_pub_extract', 'assessed_rob', 'retrieved_oa_id', 'retrieved_embase_id', 'retrieved_pubmed_id', 'title', 'abstract']].copy()
         ground_truth_df.rename(columns = {
@@ -415,13 +434,16 @@ class sql_data_migration:
                     }, inplace=True)
                     #fix evidence review id 
                     input_evidence_review_id_mapping = {
-                        '4.2.4.3.combined' : '4.2/4.3', 
-                        '1.4' : '1.4.1/1.4.2', 
-                        '1.5' : '1.5.1/1.5.2', 
-                        '2.1' : '2.1.1/2.1.2', 
+                        '4.2.4.3.combined' : '4.2,4.3', 
+                        '1.4' : '1.4.1,1.4.2', 
+                        '1.5' : '1.5.1,1.5.2', 
+                        '2.1' : '2.1.1,2.1.2', 
                         '1.9.1.embase' : '1.9.1', 
                     }
                     _df['evidence_review_id'] = _df['evidence_review_id'].map(lambda x : input_evidence_review_id_mapping[x] if x in input_evidence_review_id_mapping else x)
+                    _df['evidence_review_id'] = _df['evidence_review_id'].str.strip() 
+                    _df['evidence_review_id'] = _df['evidence_review_id'].str.replace(" ", '')
+                    _df['evidence_review_id'] = _df['evidence_review_id'].str.replace("/", ",")
                     evidence_review_id = pd.Series(_df['evidence_review_id'].unique())
                     #check that evidence review id is in the evidence review table 
                     with self.engine.connect() as conn: 
@@ -507,6 +529,8 @@ class sql_data_migration:
                 self.logger.info(f"No new search strategies to insert")
 
         self.logger.info(f"Search strategies inserted into database")  
+        #check evidence review ids are correct between embase and medline 
+        assert set(topic_specific_search_results_to_insert[0]['evidence_review_id_list']) == set(topic_specific_search_results_to_insert[1]['evidence_review_id_list']), "Evidence review ids are not correct between embase and medline"
         
         return search_results_to_insert, topic_specific_search_results_to_insert
 
@@ -516,14 +540,30 @@ class sql_data_migration:
         self.search_type = search_type
         df = pd.read_parquet(file_path)
         df = self._clean_publication_year(df)
+        #clean question ids 
+        df['question_id'] = df['question_id'].str.strip()
+        df['question_id'] = df['question_id'].str.replace(" ", '')
+        df['question_id'] = df['question_id'].str.replace("/", ",")
+        try: 
+            assert set(df['question_id'].unique()) == set(evidence_review_id_list), "Evidence review ids between consolidated search results and input evidence review ids do not match"
+        except AssertionError as e: 
+            missing_evidence_review_ids = set(df['question_id'].unique()) - set(evidence_review_id_list)
+            self.logger.error(f"Missing evidence review ids in input evidence review ids: {missing_evidence_review_ids}")
+            raise e 
         self.topicsearch_pubyear_clean_flag = True
         for search_strategy_id, evidence_review_id in zip(search_strategy_id_list, evidence_review_id_list):
+            self.logger.info(f'Inserting topic specific results for evidence review id : {evidence_review_id}. Corresponding search strategy id : {search_strategy_id}')
             if evidence_review_id == 'overall': 
                 group_df = df.copy()
+                self.migrate_search_result_articles(search_strategy_id, group_df, database_name, search_type)
             else:
                 group_df = df.query(f"question_id == '{evidence_review_id}'").copy()
-            self.logger.info(f'Inserting topic specific results for evidence review id : {evidence_review_id}. Corresponding search strategy id : {search_strategy_id}')
-            self.migrate_search_result_articles(search_strategy_id, group_df, database_name, search_type)
+                #perform check on number of results 
+                expected_num = self.expected_topicspecific_kw_num[database_name].loc[evidence_review_id.replace('.', '_').replace(',', '_')]
+                assert len(group_df) == expected_num, f"Number of results for evidence review id {evidence_review_id} does not match expected number"
+                self.migrate_search_result_articles(search_strategy_id, group_df, database_name, search_type)
+
+           
 
     def _grab_latest_search_result_article_id(self): 
                 # Get  current max ID from database if exists
@@ -568,6 +608,11 @@ class sql_data_migration:
         except Exception as e:
             self.logger.error(f"Failed to clean publication years: {e}")
             raise
+
+        #check for duplicates here 
+
+
+
 
         if self._df_sqltable_column_check(_extract, table_name): 
             filtered_df = self._prior_id_check(_extract, 'search_result_article_id', table_name, engine = self.engine, logger = self.logger)
@@ -717,24 +762,4 @@ class sql_data_migration:
         return True
 
 
-    
-    
-
-if __name__ == '__main__':
-    os.environ['PGHOST'] = '/var/run/postgresql'
-    db_name = os.getenv('DB_NAME')
-    db_user = os.getenv('DB_USER')
-    db_pwd = os.getenv('DB_PWD')
-    db_host = os.getenv('DB_HOST')
-    db_port = os.getenv('DB_PORT')
-    logger = LoggerConfig.setup_logger(logger_name = 'sql_data_migration')
-    sql_instance = sql_data_migration(db_name, db_user, db_pwd, db_host, db_port, logger)
-    sql_instance.fill_reference_tables()
-    sql_instance.migrate_gdg_data()
-    sql_instance.migrate_ground_truth_data()
-    overarching_search_results_to_insert, topic_specific_search_results_to_insert = sql_instance.migrate_search_strategies()
-    for search_results in overarching_search_results_to_insert: 
-        sql_instance.migrate_search_result_articles(search_results['search_strategy_id'], search_results['search_result_df'], search_results['database_name'], search_results['search_type'])
-    for search_results in topic_specific_search_results_to_insert: 
-        sql_instance._handle_topic_specific_search(search_results['search_strategy_id_list'], search_results['evidence_review_id_list'], search_results['file_path'], search_results['database_name'], search_results['search_type'])
-    # sql_instance.migrate_search_result_data()
+ 

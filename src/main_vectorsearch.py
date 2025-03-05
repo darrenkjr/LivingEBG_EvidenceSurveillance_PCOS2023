@@ -63,8 +63,10 @@ def main():
         logger.info(f'Migrating search strategies')
         overarching_search_results_to_insert, topic_specific_search_results_to_insert = sql_instance.migrate_search_strategies()
         for search_results in overarching_search_results_to_insert: 
+            logger.info(f'Migrating overarching search results')
             sql_instance.migrate_search_result_articles(search_results['search_strategy_id'], search_results['search_result_df'], search_results['database_name'], search_results['search_type'])
         for search_results in topic_specific_search_results_to_insert: 
+            logger.info(f'Migrating topic specific search results')
             sql_instance._handle_topic_specific_search(search_results['search_strategy_id_list'], search_results['evidence_review_id_list'], search_results['file_path'], search_results['database_name'], search_results['search_type'])
     
     elif sql_instance.check_data_migration(): 

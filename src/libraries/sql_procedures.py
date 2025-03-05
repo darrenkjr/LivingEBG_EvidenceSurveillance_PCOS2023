@@ -150,23 +150,24 @@ class sql_procedures:
         groundtruth_evidence_review_ids = ground_truth_df['question_id'].unique()
         _goldset_evidence_review_ids = pd.concat([_srupdate_goldset, _newsr_goldset])['question_id'].unique()
         missing_ids = list(set(groundtruth_evidence_review_ids) - set(_goldset_evidence_review_ids))
-        self.logger.info(f'Missing evidence review ids from goldset detected: {missing_ids}, attempt to fix, ie: treating as new sr')
-        _missing_ids_df = ground_truth_df.query('question_id in @missing_ids').copy()
-        _missing_ids_df = _missing_ids_df.groupby('question_id').apply(
-            lambda x: x.sample(
-                n=min(3, len(x)),  # x is already filtered for non-empty title/abstract
-                replace=False,
-                random_state=42
-            )
-        ).reset_index(drop=True)
+        if len(missing_ids) > 0: 
+            self.logger.warning(f'Missing evidence review ids from goldset detected: {missing_ids}, attempt to fix, ie: treating as new sr')
+            _missing_ids_df = ground_truth_df.query('question_id in @missing_ids').copy()
+            _missing_ids_df = _missing_ids_df.groupby('question_id').apply(
+                lambda x: x.sample(
+                    n=min(3, len(x)),  # x is already filtered for non-empty title/abstract
+                    replace=False,
+                    random_state=42
+                )
+            ).reset_index(drop=True)
+        else: 
+            _missing_ids_df = pd.DataFrame()
         
         goldset_df = pd.concat([_srupdate_goldset, _newsr_goldset, _missing_ids_df], ignore_index = True)
         goldset_evidence_review_ids = goldset_df['question_id'].unique()
         assert set(goldset_evidence_review_ids) == set(groundtruth_evidence_review_ids), f'Goldset evidence review ids are not consistent with ground truth evidence review ids. Missing ids : {set(groundtruth_evidence_review_ids) - set(_goldset_evidence_review_ids)}'
         
         goldset_ids = "'" + "','".join(map(str, goldset_df['included_article_id'])) + "'"
-
-     
 
 
         queries = [f"""
@@ -291,6 +292,7 @@ class sql_procedures:
                 # Create view
                 for query in queries: 
                     conn.execute(text(query))
+            try:    
                 result = pd.read_sql("SELECT * FROM groundtruth_eval_set_2017new", self.engine)
                 actual_count = result.shape[0]
                 
@@ -304,14 +306,16 @@ class sql_procedures:
                     self.logger.warning(f"ID difference: {set(result['ground_truth_article_id']) - set(expected['included_article_id'])}")
                 else:
                     self.logger.info(f"Ground truth evaluation set view created successfully with {actual_count} rows")
+
+                return result 
+            except Exception as e: 
+                self.logger.error(f"Error creating ground truth evaluation set view: {e}")
+                raise e 
                 
         except Exception as e:
             self.logger.error(f"Error creating ground truth evaluation set view: {e}")
             raise
-            
-        eval_df = pd.read_sql("SELECT * FROM groundtruth_eval_set_2017new", self.engine)
-        return eval_df
-    # Compare the data directly
+
 
     def setup_embeddings_table(self, materialized_view_name, embedding_table_name, linking_table_name, linking_id, id_dtype): 
         '''
