@@ -278,7 +278,15 @@ class ConvenienceFunc:
             else:
                 self.logger.error(f'Some question_ids are missing from the evaluation ground truth dataframe: {missing_question_ids}')
                 raise e
-
+        
+        #check for duplicates 
+        duplicates = groundtruth_eval_df.duplicated(subset = ['included_reference', 'question_id'])
+        duplicate_row = groundtruth_eval_df[duplicates]
+        if duplicates.any():
+            self.logger.warning(f'Duplicates found in the ground truth dataframe: {groundtruth_eval_df[duplicates]}')
+            self.logger.warning(f'Length of ground truth before removing duplicates: {len(groundtruth_eval_df)}')
+            groundtruth_eval_df = groundtruth_eval_df.drop_duplicates(subset = ['included_reference', 'question_id'])
+            self.logger.warning(f'Length of ground truth after removing duplicates: {len(groundtruth_eval_df)}')
         groundtruth_eval_df.to_parquet(dataset_dir / 'groundtruth_eval.parquet')
         groundtruth_eval_df.to_excel(dataset_dir / 'groundtruth_eval.xlsx', index=False)
         print('Length of ground truth to be evaluated (ie: papers that were included in this latest edition of the guideline):', len(groundtruth_eval_df))

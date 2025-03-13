@@ -81,7 +81,7 @@ def main():
     vector_search_cls = vector_search_implementation(logger = logger, engine = engine)
     vector_search_cls.generate_embeddings_if_needed()
 
-    for search_type in ['overarching', 'topic-specific']: 
+    for search_type in ['topic-specific','overarching']: 
         logger.info(f'Running vector search implementation for search type: {search_type}')
         eval_metrics_df = pd.DataFrame()
 

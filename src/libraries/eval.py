@@ -24,15 +24,19 @@ class vectorsearch_eval_metrics:
     nnr_raw: int # nnr before cutoff 
     rank_new_relevant : int #nnr before screening first correct result (not in goldset)
     rank_first_relevant : int #nnr before screening first correct result (all))
-    nnr_threshold: int # total nnr after applying similiarity threshold
+    nnr_cutoff: int # total nnr after applying similiarity threshold
     n_retrieved: int 
     n_missed: int
     recall: float
+    recall_cutoff: float
     precision: float
     precision_cutoff: float
     f1_score: float
     f2_score: float
     f3_score: float
+    f1_score_cutoff: float
+    f2_score_cutoff: float
+    f3_score_cutoff: float
     recall_at_10 : float 
     recall_at_100: float 
     recall_at_1000: float
@@ -40,6 +44,7 @@ class vectorsearch_eval_metrics:
     mrr: float
     mrr_new_relevant: float
     overall_screening_workload: int
+    overall_screening_workload_cutoff: int
 
 
 
@@ -677,13 +682,13 @@ class search_evaluation:
         if len(comparison_df) == 0: 
             self.logger.warning(f'No comparison / evalutation set found for current evidence_review_id. Verify this is intended. Returning empty results.')
             return vectorsearch_eval_metrics(
-                nnr_raw= 0, rank_new_relevant= 0, nnr_threshold= 0, mrr = 0,
-                n_retrieved= 0, n_missed= 0, 
-                recall= 0, precision= 0, precision_cutoff= 0, 
-                f1_score= 0, f2_score= 0, f3_score= 0, 
-                recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, 
-                similarity_threshold_cutoff= 0, overall_screening_workload = len(raw_results_df)), pd.DataFrame()
-
+                    nnr_raw= 'N/A', rank_new_relevant= 'N/A', nnr_cutoff= 'N/A', n_retrieved= 0, n_missed= 0, 
+                    recall= 0, recall_cutoff= 0, 
+                    precision= 0, precision_cutoff= 0, 
+                    f1_score= 0, f2_score= 0, f3_score= 0, f1_score_cutoff= 0, f2_score_cutoff= 0, f3_score_cutoff= 0,
+                    recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, similarity_threshold_cutoff= 0, mrr_new_relevant= 0, mrr= 0, rank_first_relevant= 0, 
+                    overall_screening_workload = len(raw_results_df), overall_screening_workload_cutoff = len(raw_results_df)), pd.DataFrame()
+                
         elif len(comparison_df) > 0: 
                         
             
@@ -699,7 +704,6 @@ class search_evaluation:
                 n_missed = len(comparison_df) - len(matches) #total number of missed results 
                 precision = len(matches) / len(raw_results_df_dedupe) #precision of the search (raw)
                 nnr_raw = 1/precision # total number of results to read before looking at ranking 
-                precision_cutoff = precision
                 
                 f1 = self._calc_fscore(precision, recall, 1)
                 f2 = self._calc_fscore(precision, recall, 2)
@@ -723,30 +727,36 @@ class search_evaluation:
                     
                     recall_at_k_dct[f'recall_at_{k}'] = recall_at_k
 
-                similarity_threshold_cutoff = matches['cosine_similarity'].min()
-                
-                result_cutoff_df = raw_results_df_dedupe.query(f'cosine_similarity >= {similarity_threshold_cutoff}')
-                
-                
+                matches_sorted = matches.sort_values('combined_rank_rrf')
+                last_relevant_match = matches_sorted.iloc[-1]
+                last_relevant_index = raw_results_df_dedupe.index[raw_results_df_dedupe['original_id'] == last_relevant_match['original_id']].tolist()[0]
+                similarity_threshold_cutoff = last_relevant_match['cosine_similarity']
+                result_cutoff_df = raw_results_df_dedupe.iloc[:last_relevant_index + 1].copy()
+
+
                 matched_cutoff = self._evaluate_vs_matches(comparison_df, result_cutoff_df, self.database)
                 recall_cutoff = len(matched_cutoff) / len(comparison_df)
-                precision_cutoff = len(matched_cutoff) / len(result_cutoff_df)
-                nnr_threshold = 1/precision_cutoff
-                
                 assert recall_cutoff == recall 
+                precision_cutoff = len(matched_cutoff) / len(result_cutoff_df)
+                f1_cutoff = self._calc_fscore(precision_cutoff, recall_cutoff, 1)
+                f2_cutoff = self._calc_fscore(precision_cutoff, recall_cutoff, 2)
+                f3_cutoff = self._calc_fscore(precision_cutoff, recall_cutoff, 3)
+                nnr_cutoff = 1/precision_cutoff
+                
                  #check recall for the trimmed results 
                 recall_at_10, recall_at_100, recall_at_1000 = recall_at_k_dct['recall_at_10'], recall_at_k_dct['recall_at_100'], recall_at_k_dct['recall_at_1000']
-                overall_screening_workload = len(result_cutoff_df)
+                overall_screening_workload = len(raw_results_df)
+                overall_screening_workload_cutoff = len(result_cutoff_df)
 
             elif len(matches) == 0: 
                 self.logger.warning(f'No matches found for current evidence_review_id. Returning 0 recall.')
                 return vectorsearch_eval_metrics(
-                    nnr_raw= 'N/A', rank_new_relevant= 'N/A', nnr_threshold= 'N/A',
-                    n_retrieved= 0, n_missed= len(comparison_df), 
-                    recall= 0, precision= 0, precision_cutoff= 0, 
-                    f1_score= 0, f2_score= 0, f3_score= 0, 
-                    recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, 
-                    similarity_threshold_cutoff= 0, mrr_new_relevant= 0, mrr= 0, rank_first_relevant= 0, overall_screening_workload = len(raw_results_df)), pd.DataFrame()
+                    nnr_raw= 'N/A', rank_new_relevant= 'N/A', nnr_cutoff= 'N/A', n_retrieved= 0, n_missed= len(comparison_df), 
+                    recall= 0, recall_cutoff= 0, 
+                    precision= 0, precision_cutoff= 0, 
+                    f1_score= 0, f2_score= 0, f3_score= 0, f1_score_cutoff= 0, f2_score_cutoff= 0, f3_score_cutoff= 0,
+                    recall_at_10= 0, recall_at_100= 0, recall_at_1000= 0, similarity_threshold_cutoff= 0, mrr_new_relevant= 0, mrr= 0, rank_first_relevant= 0, 
+                    overall_screening_workload = len(raw_results_df), overall_screening_workload_cutoff = len(raw_results_df)), pd.DataFrame()
                 
 
             assert (0 <= recall) and (recall <= 1), f'Recall is {recall}, which is not a valid recall value'
@@ -759,7 +769,7 @@ class search_evaluation:
             self.logger.info(f'Similarity threshold cutoff: {similarity_threshold_cutoff}')
             self.logger.info(f'Recall of the search (cutoff): {recall_cutoff}')
             self.logger.info(f'Precision of the search (cutoff): {precision_cutoff}')
-            self.logger.info(f'NNR of the search (cutoff): {nnr_threshold}')
+            self.logger.info(f'NNR of the search (cutoff): {nnr_cutoff}')
             self.logger.info(f'Rank of first match not in goldset: {rank_new_relevant}')
             self.logger.info(f'Rank of first relevant match (including goldset): {rank_first_relevant}')
             self.logger.info(f'Mean reciprocal rank (traditional): {mrr}')
@@ -768,7 +778,12 @@ class search_evaluation:
             self.logger.info(f'Recall at first 100: {recall_at_100}')
             self.logger.info(f'Recall at first 1000: {recall_at_1000}')
 
-            return vectorsearch_eval_metrics(nnr_raw= nnr_raw, rank_new_relevant= rank_new_relevant, nnr_threshold= nnr_threshold, n_retrieved= n_retrieved, n_missed= n_missed, recall= recall, precision= precision, precision_cutoff= precision_cutoff, f1_score= f1, f2_score= f2, f3_score= f3, recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff, mrr_new_relevant= mrr_new_relevant, mrr= mrr, rank_first_relevant= rank_first_relevant, overall_screening_workload = overall_screening_workload), result_cutoff_df
+            return vectorsearch_eval_metrics(nnr_raw= nnr_raw, rank_new_relevant= rank_new_relevant, nnr_cutoff= nnr_cutoff, n_retrieved= n_retrieved, n_missed= n_missed, 
+                                             recall= recall, recall_cutoff = recall, 
+                                             precision= precision, precision_cutoff= precision_cutoff, 
+                                             f1_score= f1, f2_score= f2, f3_score= f3, f1_score_cutoff= f1_cutoff, f2_score_cutoff= f2_cutoff, f3_score_cutoff= f3_cutoff,
+                                             recall_at_10= recall_at_10, recall_at_100= recall_at_100, recall_at_1000= recall_at_1000, similarity_threshold_cutoff= similarity_threshold_cutoff, mrr_new_relevant= mrr_new_relevant, mrr= mrr, rank_first_relevant= rank_first_relevant, 
+                                             overall_screening_workload = overall_screening_workload, overall_screening_workload_cutoff= overall_screening_workload_cutoff), result_cutoff_df
         
     
     def _calc_fscore(self, precision: float, recall: float, beta: float = 1) -> float: 

@@ -323,7 +323,16 @@ class vector_search_implementation():
         raw_adjusted_flag = 'raw'
         eval_metrics_df, cutoff_df = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df, raw_adjusted_flag = raw_adjusted_flag)
         raw_adjusted_flag = 'adjusted'
-        eval_metrics_df_adjusted, cutoff_df_adjusted = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df_adjusted, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df, raw_adjusted_flag = raw_adjusted_flag)
+        if len(evaluation_set_df_adjusted) > 0: 
+            eval_metrics_df_adjusted, cutoff_df_adjusted = eval_cls.run_vectorsearch_eval_pipeline(result_set = rrf_sim_result_df, evaluation_set = evaluation_set_df_adjusted, query_vector_df = query_vector_df, database_name = database_name, search_strat_df = search_strat_df, raw_adjusted_flag = raw_adjusted_flag)
+        else: 
+            #in instances where a prior the entire evaluation set was empty, we need to create a placeholder dataframe for adjusted metrics 
+            eval_metrics_df_adjusted = pd.DataFrame(columns = eval_metrics_df.columns)
+            eval_metrics_df_adjusted['database', 'search_type', 'search_strategy', 'vector_search_type', 'search_strategy_id', 'evidence_review_id'] = eval_metrics_df[['database', 'search_type', 'search_strategy', 'vector_search_type', 'search_strategy_id', 'evidence_review_id']]
+            metric_col = [col for col in eval_metrics_df.columns if col not in ['database', 'search_type', 'search_strategy', 'vector_search_type', 'search_strategy_id', 'evidence_review_id']]
+            adjusted_metric_col = [f'{col}_adjusted' for col in metric_col]
+            eval_metrics_df_adjusted[adjusted_metric_col] = 'N/A'
+            cutoff_df_adjusted = pd.DataFrame()
         
         
         eval_metrics_merged = pd.merge(eval_metrics_df, eval_metrics_df_adjusted, on = ['database', 'search_type', 'search_strategy', 'vector_search_type', 'search_strategy_id', 'evidence_review_id'], how = 'outer')
