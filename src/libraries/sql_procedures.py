@@ -121,17 +121,35 @@ class sql_procedures:
         '''
 
         self.logger.info(f'Creating goldset view')
-        #recreate view in SQL - actually change this to random (3) articles per evidence review 
         ground_truth_df = pd.read_parquet(Path(__file__).parent.parent / 'dataset' / 'fullgroundtruth_valid_apimerge_df.parquet')
         ground_truth_df['year_pub_extract'] = pd.to_numeric(
                 ground_truth_df['year_pub_extract'], 
                 errors='coerce'
             ).astype('Int64')  
+        ground_truth_df.rename(columns = {'question_id' : 'evidence_review_id',
+                                          'included_article_id': 'ground_truth_article_id',
+                                          }, inplace=True)
         ground_truth_df.reset_index(inplace = True)
-       
+        #standardize qustion ids replace / with , 
+        ground_truth_df['evidence_review_id'] = ground_truth_df['evidence_review_id'].str.replace('/', ',')
+
+
+        eval_set_df = self.retrieve_evaluation_set(evidence_review_id = 'overall')
+        eval_er_ids = set(eval_set_df['evidence_review_id'])
+        goldset_pool = ground_truth_df.query('evidence_review_id in @eval_er_ids')
+        _srupdate_previous = goldset_pool.query('sr_update == "Y" & title.notna() & abstract.notna() & year_pub_extract <= searchstrat_year_start').copy()
+        _srupdate_goldset = _srupdate_previous.groupby('evidence_review_id').apply(
+            lambda x: x.sample(
+                n=min(3, len(x)),  # x is already filtered for non-empty title/abstract
+                replace=False,
+                random_state=42
+            )
+        ).reset_index(drop=True)
+        _srupdate_ids = set(_srupdate_previous['evidence_review_id'])
         
-        _srupdate_previous = ground_truth_df.query('sr_update == "Y" & title.notna() & abstract.notna() & year_pub_extract <= searchstrat_year_start').copy()
-        _srupdate_goldset = _srupdate_previous.groupby('question_id').apply(
+        _newsr_ids = set(goldset_pool['evidence_review_id']) - _srupdate_ids 
+        _newsr_articles = goldset_pool.query('evidence_review_id in @_newsr_ids & title.notna() & abstract.notna()').copy()
+        _newsr_goldset = _newsr_articles.groupby('evidence_review_id').apply(
             lambda x: x.sample(
                 n=min(3, len(x)),  # x is already filtered for non-empty title/abstract
                 replace=False,
@@ -139,21 +157,13 @@ class sql_procedures:
             )
         ).reset_index(drop=True)
 
-        _newsr_articles = ground_truth_df.query('sr_update != "Y" & title.notna() & abstract.notna()').copy()
-        _newsr_goldset = _newsr_articles.groupby('question_id').apply(
-            lambda x: x.sample(
-                n=min(3, len(x)),  # x is already filtered for non-empty title/abstract
-                replace=False,
-                random_state=42
-            )
-        ).reset_index(drop=True)
-        groundtruth_evidence_review_ids = ground_truth_df['question_id'].unique()
-        _goldset_evidence_review_ids = pd.concat([_srupdate_goldset, _newsr_goldset])['question_id'].unique()
-        missing_ids = list(set(groundtruth_evidence_review_ids) - set(_goldset_evidence_review_ids))
+        _goldset_evidence_review_ids = set(pd.concat([_srupdate_goldset, _newsr_goldset])['evidence_review_id'])
+        missing_ids = list(eval_er_ids - _goldset_evidence_review_ids)
         if len(missing_ids) > 0: 
             self.logger.warning(f'Missing evidence review ids from goldset detected: {missing_ids}, attempt to fix, ie: treating as new sr')
-            _missing_ids_df = ground_truth_df.query('question_id in @missing_ids').copy()
-            _missing_ids_df = _missing_ids_df.groupby('question_id').apply(
+            #typicall this happens if you have a SR update that only included articles from 2017 onwards 
+            _missing_ids_df = ground_truth_df.query('evidence_review_id in @missing_ids').copy()
+            _missing_ids_df = _missing_ids_df.groupby('evidence_review_id').apply(
                 lambda x: x.sample(
                     n=min(3, len(x)),  # x is already filtered for non-empty title/abstract
                     replace=False,
@@ -164,10 +174,14 @@ class sql_procedures:
             _missing_ids_df = pd.DataFrame()
         
         goldset_df = pd.concat([_srupdate_goldset, _newsr_goldset, _missing_ids_df], ignore_index = True)
-        goldset_evidence_review_ids = goldset_df['question_id'].unique()
-        assert set(goldset_evidence_review_ids) == set(groundtruth_evidence_review_ids), f'Goldset evidence review ids are not consistent with ground truth evidence review ids. Missing ids : {set(groundtruth_evidence_review_ids) - set(_goldset_evidence_review_ids)}'
-        
-        goldset_ids = "'" + "','".join(map(str, goldset_df['included_article_id'])) + "'"
+        goldset_evidence_review_ids = goldset_df['evidence_review_id'].unique()
+        try: 
+            assert set(goldset_evidence_review_ids) == set(eval_er_ids)
+        except AssertionError: 
+            self.logger.error(f'Missing evidence review ids detected: {eval_er_ids - set(goldset_evidence_review_ids)}')
+            raise
+
+        goldset_ids = "'" + "','".join(map(str, goldset_df['ground_truth_article_id'])) + "'"
 
 
         queries = [f"""
@@ -362,9 +376,6 @@ class sql_procedures:
         except Exception as e: 
             self.logger.error(f'Error creating embeddings table {embedding_table_name}: {e}')
             raise e 
-
-
-
 
     def add_embeddings_to_sql(self, embedding_table_name, input_df, linking_id): 
         '''
@@ -609,10 +620,6 @@ class sql_procedures:
 
         try:
             with self.engine.begin() as conn: 
-
-                # self.logger.info(f'Cleaning up previous vector search results for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id}')
-                # conn.execute(text(clean_up_query))
-
                 self.logger.info(f'Running vector search for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id} for vector search type: {vector_search_type}')
                 conn.execute(text(vector_search_query))
                 self.logger.info(f'Vector search completed for search strategy id: {searchstrat_id} and corresponding evidence review id: {evidence_review_id} for vector search type: {vector_search_type}')
@@ -682,7 +689,7 @@ class sql_procedures:
                  #get all evidence review topic embeddings 
                 goldset_query_filter = f""
 
-            if vector_search_type == 'one-shot': 
+            elif vector_search_type == 'one-shot': 
             
                 query_table_name = 'query_goldset_embeddings'
                 id = 'ground_truth_article_id'
@@ -698,7 +705,7 @@ class sql_procedures:
                         ) selected_goldset_articles 
                     ON {query_table_name}.{id} = selected_goldset_articles.selected_article_id
                 """
-            if vector_search_type == 'few-shot': 
+            elif vector_search_type == 'few-shot': 
                 query_table_name = 'query_goldset_embeddings'
                 id = 'ground_truth_article_id'
                 #get all prepared goldset embeddings (which amounts to 3 articles per evidence review id)

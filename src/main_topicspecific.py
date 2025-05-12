@@ -1,4 +1,4 @@
-from embmedline_ris_pipeline import embmedline_ris_pipeline
+from src.libraries.embmedline_ris_pipeline import embmedline_ris_pipeline
 # from libraries.vector_search import vector_search_implementation
 import asyncio
 import pandas as pd

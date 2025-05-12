@@ -1,9 +1,8 @@
 import dotenv
 dotenv.load_dotenv()
-from embmedline_ris_pipeline import embmedline_ris_pipeline
-from openalex_overarching_search import oa_overarching_search
-from openalex_keywordsearch import oa_keywordsearch_dev
-from pubmed_overarching_search import pubmed_overarching_search
+from src.libraries.embmedline_ris_pipeline import embmedline_ris_pipeline
+from src.libraries.openalex_keywordsearch import oa_keywordsearch_dev
+from src.libraries.pubmed_overarching_search import pubmed_overarching_search
 from openpyxl import load_workbook
 import asyncio
 import pandas as pd

@@ -75,8 +75,9 @@ def main():
         
     logger.info('Initializing vector search')
     sql_procedures_cls = sql_procedures(logger = logger, engine = engine)
-    sql_procedures_cls.create_querygoldset_view()
     sql_procedures_cls.create_evaluation_set_view_2017included()
+    sql_procedures_cls.create_querygoldset_view()
+    
     sql_procedures_cls.create_query_evidencereview_topic_view()
     vector_search_cls = vector_search_implementation(logger = logger, engine = engine)
     vector_search_cls.generate_embeddings_if_needed()
