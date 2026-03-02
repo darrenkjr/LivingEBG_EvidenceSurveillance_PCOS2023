@@ -1,0 +1,1085 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(arrow)  # For reading parquet files
+library(readxl)  # For reading Excel files
+library(dplyr)   # For data manipulation
+library(tidyr)
+library(purrr)
+library(gt)
+library(lme4)
+library(lmerTest)
+library(clubSandwich)
+library(DHARMa)
+library(ggplot2)
+library(emmeans)
+library(stringr)
+library(readr)
+
+
+```
+
+```{r}
+topic_comparison_r <- read_parquet("topic_comparison.parquet")
+run_full_models <- function(db_data, db_name, metric) {
+  # Handle recall metrics specially
+  if (grepl("recall", tolower(metric))) {
+    vector_search_types <- c("few-shot")
+    filtered_data <- db_data %>%
+      filter(vector_search_type %in% vector_search_types | vector_search_type == "none")
+    cat(sprintf("Using only %s for %s due to identical recall values\n", 
+                paste(vector_search_types, collapse=", "), metric))
+    model_fam <- "gaussian"
+  } else if (metric == "log_nnr" || metric == "nnr") {
+    filtered_data <- db_data %>% filter(nnr > 0)
+    model_fam <- "gaussian"
+  } else {
+    # For other metrics
+    filtered_data <- db_data
+    model_fam <- "gaussian"
+  }
+  
+  # Create formula
+  formula_str <- paste0(metric, "~ workflow_group + database + (1|standardised_question_id)")
+  model_formula <- as.formula(formula_str)
+  
+  # Print info
+  cat(sprintf('metric: %s, family: %s\n', metric, model_fam))
+  
+  # Fit the model
+  if (model_fam == "gaussian") {
+    model <- lmer(model_formula, data = filtered_data, REML = TRUE)
+    
+    # Get robust standard errors
+    robust_results <- coef_test(model, vcov = "CR1", test = "Satterthwaite")
+    robust_coefs <- as.data.frame(robust_results)
+    
+    # Get regular model summary
+    model_summary <- summary(model)
+    regular_coefs <- as.data.frame(model_summary$coefficients)
+    
+    # Use robust coefficients for reporting
+    coefs <- robust_coefs
+    
+  } else if (model_fam == "Gamma") {
+    model <- glmer(model_formula, data = filtered_data, family = Gamma(link = "log"))
+    model_summary <- summary(model)
+    coefs <- as.data.frame(model_summary$coef)
+  }
+  
+  # Add log transformation effects if needed
+  if (startsWith(metric, "log")) {
+    # Check column names to ensure we're using the right one
+    if ("Estimate" %in% names(coefs)) {
+      coefs$exp_estimate <- exp(coefs$Estimate)
+    } else if (names(coefs)[1] == "Estimate") {
+      coefs$exp_estimate <- exp(coefs[[1]])
+    }
+  }
+  
+  coefs$metric <- metric
+  
+  # Print results
+  cat(sprintf("\n%s Model Results for %s:\n", metric, db_name))
+  print(model_summary)
+  
+  # Create DHARMa residuals
+  sim_residuals <- simulateResiduals(model)
+  
+  # Plot diagnostics
+  par(mfrow = c(1, 1))
+  par(oma = c(0, 0, 2, 0))
+  plot(sim_residuals)
+  title(main = paste("DHARMa Residual Diagnostics for", metric), outer = TRUE)
+  
+  # Residuals vs. fitted plot
+  par(mfrow = c(1, 1))
+  plot(fitted(model), resid(model), 
+       xlab = "Fitted values", 
+       ylab = "Residuals",
+       main = paste("Traditional Residuals vs. Fitted Values for", metric))
+  abline(h = 0, col = "red", lty = 2)
+  
+  # Return model and results
+  return(list(
+    model = model_summary,
+    results = coefs,
+    regular_results = if(exists("regular_coefs")) regular_coefs else NULL,
+    residuals = sim_residuals,
+    fitted_model = model  # Include the full model for additional analysis
+  ))
+}
+
+# Define metric mappings
+metric_mappings_logit <- list(
+  'nnr' = 'log_nnr',
+  'precision' = 'logit_precision',
+  'f1_score' = 'logit_f1_score',
+  'f3_score' = 'logit_f3_score',
+  'recall' = 'logit_recall',
+  'recall_adjusted' = 'logit_recall_adjusted',
+  'overall_screening_workload' = 'log_overall_screening_workload'
+)
+
+# Apply transformations with metric-specific epsilons
+for (source_metric in names(metric_mappings_logit)) {
+  target_col <- metric_mappings_logit[[source_metric]]
+  
+  # Calculate min non-zero value and epsilon
+  min_nonzero <- min(topic_comparison_r[topic_comparison_r[[source_metric]] > 0, source_metric], na.rm = TRUE)
+  epsilon <- max(min_nonzero / 10, 1e-6)
+  
+  # Store epsilon
+  topic_comparison_r[[paste0("epsilon_", source_metric)]] <- epsilon
+  
+  # Log transformation
+  topic_comparison_r[[paste0("log_", source_metric)]] <- log(topic_comparison_r[[source_metric]] + epsilon)
+}
+
+# Define metrics to model
+comparison_metrics <- c('recall', 'recall_adjusted', 'log_precision', 'log_f1_score', 'log_f3_score', 'nnr')
+comparison_metrics_log <- c('log_recall', 'recall', 'log_nnr', 'log_precision', 'log_f1_score', 'log_f3_score' , 'overall_screening_workload', 'log_overall_screening_workload')
+untransformed_metrics <- c('recall', 'log_recall', 'logit_recall', 'recall_adjusted', 'precision', 'f1_score', 'f3_score')
+
+# Filter for Embase and Medline only for Valid Comparison between W4 and W1
+topic_comparison_embasemedline <- topic_comparison_r %>%
+  filter(database %in% c("embase", "medline")) %>% 
+  mutate(workflow_group = factor(workflow_group, 
+                          levels = c("Workflow 1 (T) + none",           # baseline
+                                          "Workflow 4 (O+TVS) + zero-shot",           # replace with actual name
+                                          "Workflow 4 (O+TVS) + one-shot",            # replace with actual name  
+                                          "Workflow 4 (O+TVS) + few-shot")))
+  
+
+# Initialize model dictionary
+models <- list()
+
+# Run models for each metric
+for (metric in comparison_metrics_log) {
+  models[[metric]] <- run_full_models(topic_comparison_embasemedline, "all", metric)
+}
+```
+
+
+```{r}
+# Function to extract all required statistics
+extract_full_stats <- function(model_list) {
+  result_list <- list()
+  random_effects_info <- list()
+  
+  for (metric_name in names(model_list)) {
+    model_obj <- model_list[[metric_name]][["model"]]
+    coef_df <- as.data.frame(model_obj$coefficients)
+    print(metric_name)
+    
+    # Get p-values if available
+    if ("Pr(>|t|)" %in% colnames(coef_df)) {
+      p_values <- coef_df[, "Pr(>|t|)"]
+    } else {
+      p_values <- rep(NA, nrow(coef_df))
+    }
+    
+    # Get exponentiated estimates (for log/logit metrics)
+    exp_estimates <- exp(coef_df[, "Estimate"])
+    
+    # Calculate 95% CI for exponentiated estimates
+    lower_CI <- exp(coef_df[, "Estimate"] - 1.96 * coef_df[, "Std. Error"])
+    upper_CI <- exp(coef_df[, "Estimate"] + 1.96 * coef_df[, "Std. Error"])
+    
+    # Create formatted string with estimate and CI
+    exp_with_CI <- paste0(round(exp_estimates, 3), " [", round(lower_CI, 3), "-", round(upper_CI, 3), "]")
+    
+    # Create data frame with all statistics
+    df <- data.frame(
+      Parameter = rownames(coef_df),
+      Estimate = coef_df[, "Estimate"],
+      Exp_Estimate = exp_estimates,
+      Exp_with_CI = exp_with_CI,
+      SE = coef_df[, "Std. Error"],
+      t_value = coef_df[, "t value"],
+      p_value = p_values,
+      Metric = metric_name
+    )
+    result_list[[metric_name]] <- df
+    
+    # Extract random effects variances based on the model structure in the image
+    # From the image, we can see the model has a varcor component
+    if (!is.null(model_obj$varcor)) {
+      tryCatch({
+        # Get the VarCorr object
+        vc <- model_obj$varcor[[1]]  # First (and likely only) element
+        
+        # Extract random intercept variance (question variance)
+        # Based on the image, this should be available in the varcor component
+        question_var <- as.numeric(attr(vc, "stddev")[1]^2)
+        
+        # Get residual variance - sigma is available directly in the model object
+        residual_var <- model_obj$sigma^2
+        
+        # Calculate ICC
+        icc <- question_var / (question_var + residual_var)
+        
+        random_effects_info[[metric_name]] <- list(
+          question_var = question_var,
+          question_sd = sqrt(question_var),
+          residual_var = residual_var, 
+          residual_sd = model_obj$sigma,
+          icc = icc
+        )
+        
+        cat(sprintf("\nRandom Effects for %s:\n", metric_name))
+        cat(sprintf("Question variance: %.3f\n", question_var))
+        cat(sprintf("Residual variance: %.3f\n", residual_var))
+        cat(sprintf("ICC: %.3f (%.1f%% of variance due to question differences)\n", 
+                    icc, icc*100))
+      }, error = function(e) {
+        warning(paste("Error extracting random effects for", metric_name, ":", e$message))
+      })
+    } else if (!is.null(model_obj$random)) {
+      # Alternative approach if varcor is not available but random is
+      tryCatch({
+        # Get variance components from the random attribute
+        question_var <- model_obj$random[1]  # First random effect variance
+        residual_var <- model_obj$sigma^2
+        
+        # Calculate ICC
+        icc <- question_var / (question_var + residual_var)
+        
+        random_effects_info[[metric_name]] <- list(
+          question_var = question_var,
+          question_sd = sqrt(question_var),
+          residual_var = residual_var,
+          residual_sd = model_obj$sigma,
+          icc = icc
+        )
+      }, error = function(e) {
+        warning(paste("Error extracting random effects for", metric_name, ":", e$message))
+      })
+    }
+  }
+  
+  # Combine all results
+  fixed_effects <- bind_rows(result_list)
+  return(list(fixed_effects = fixed_effects, random_effects = random_effects_info))
+}
+```
+
+
+```{r}
+# Get comprehensive statistics
+log_transform_models <- models[grep("^log_", names(models))]
+stats_results <- extract_full_stats(log_transform_models)
+all_stats <- stats_results$fixed_effects
+random_effects <- stats_results$random_effects
+
+# Create random effects text with ICC
+random_effects_text <- sapply(names(random_effects), function(metric) {
+  re <- random_effects[[metric]]
+  paste0(
+    "*", metric, ":* ICC = ", round(re$icc, 3), " (", round(re$icc * 100, 1), "% of variance due to question differences)  \n",
+    "Question ID: Variance = ", round(re$question_var, 3), " (SD = ", round(re$question_sd, 3), "), ",
+    "Residual: Variance = ", round(re$residual_var, 3), " (SD = ", round(re$residual_sd, 3), ")"
+  )
+})
+
+# Join the random effects text with line breaks between metrics
+random_effects_formatted <- paste(random_effects_text, collapse = "\n\n")
+
+# Create a nicer table with gt - one metric per parameter per row
+all_stats %>%
+    # Only correct workflow_group effects, not database
+  filter(str_detect(Parameter, "workflow_group")) %>%
+  mutate(adj_p_value = p.adjust(p_value, method = "BH")) %>%
+  # Add back uncorrected database rows if you want to show them
+  bind_rows(
+    all_stats %>% 
+    filter(!str_detect(Parameter, "workflow_group")) %>%
+    mutate(adj_p_value = p_value)  # No correction for control variables
+  ) %>%
+  # Apply FDR correction across all tests, regardless of metric
+  mutate(
+    # Add Benjamini-Hochberg adjusted p-values
+    adj_p_value = p.adjust(p_value, method = "BH"),
+    # Add significance markers based on adjusted p-values
+    Sig = case_when(
+      adj_p_value < 0.001 ~ "***",
+      adj_p_value < 0.01 ~ "**",
+      adj_p_value < 0.05 ~ "*",
+      adj_p_value < 0.1 ~ ".",
+      TRUE ~ ""
+    )
+  ) %>%
+  # Round numbers for display
+  mutate(
+    Estimate = round(Estimate, 3),
+    Exp_Estimate = round(Exp_Estimate, 3),
+    SE = round(SE, 3),
+    t_value = round(t_value, 3),
+    p_value = round(p_value, 3),
+    adj_p_value = round(adj_p_value, 3)
+  ) %>%
+  # Arrange by Parameter and Metric for better organization
+  arrange(Parameter, Metric) %>%
+  # Reorder columns as requested, using Exp_with_CI instead of separate CI columns
+  select(Metric, Estimate, Exp_with_CI, SE, t_value, p_value, adj_p_value, Sig, Parameter) %>%
+  # Create the table
+  gt(groupname_col = "Parameter") %>%
+  tab_header(
+    title = "Comprehensive Model Statistics",
+    subtitle = "Showing estimates, exponentiated estimates with 95% CI, t-statistics, and p-values with FDR correction"
+  ) %>%
+  # Format the table columns
+  cols_label(
+    Metric = "Metric",
+    Estimate = "Estimate",
+    Exp_with_CI = "Exp(Estimate) [95% CI]",
+    SE = "Std. Error",
+    t_value = "t-value",
+    p_value = "p-value",
+    adj_p_value = "Adjusted p-value",
+    Sig = "Sig."
+  ) %>%
+  # Format p-values
+  fmt_number(
+    columns = c(Estimate, SE, t_value, p_value, adj_p_value),
+    decimals = 3
+  ) %>%
+  # Add significance footnote
+  tab_footnote(
+    footnote = "Significance codes: *** p<0.001, ** p<0.01, * p<0.05, . p<0.1 (based on adjusted p-values)",
+    locations = cells_column_labels(columns = Sig)
+  ) %>%
+  # Highlight significant results based on adjusted p-values
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(
+      columns = c(Estimate, Exp_with_CI, t_value, p_value, adj_p_value, Sig),
+      rows = adj_p_value < 0.05
+    )
+  ) %>%
+  # Add footnote about FDR correction
+  tab_footnote(
+    footnote = "p-values adjusted using Benjamini-Hochberg procedure to control false discovery rate",
+    locations = cells_column_labels(columns = adj_p_value)
+  ) %>%
+  # Add source note for the random effects
+  tab_source_note(
+    source_note = md("**Random Effects Variance Components and ICC:**")
+  ) %>%
+  # Add random effects information with ICC as a single source note
+  tab_source_note(
+    source_note = md(random_effects_formatted)
+  ) %>%
+  # Add model formula
+  tab_source_note(
+    source_note = md("**Model formula:** metric ~ workflow_group + database + (1|standardised_question_id)"))
+
+all_stats
+```
+## EMMs - W1 vs W4
+```{r}
+# Function to get comprehensive EMMs results for a single metric
+get_comprehensive_emms <- function(model_results, metric_name) {
+  fitted_model <- model_results$fitted_model
+  
+  # Get EMMs for workflow groups
+  emm_combined <- emmeans(fitted_model, ~ workflow_group)
+  
+  # Get the summary with confidence intervals
+  emm_summary <- summary(emm_combined, infer = TRUE)
+  emm_df <- as.data.frame(emm_summary)
+  
+  # Add exponentiated values (back-transformed from log scale)
+  emm_df$exp_emmeans <- exp(emm_df$emmean)
+  emm_df$exp_lower <- exp(emm_df$lower.CL)
+  emm_df$exp_upper <- exp(emm_df$upper.CL)
+  
+  # Format confidence intervals
+  emm_df$exp_ci <- sprintf("%.4f [%.4f-%.4f]", 
+                          emm_df$exp_emmeans, 
+                          emm_df$exp_lower, 
+                          emm_df$exp_upper)
+  
+  # Get pairwise comparisons with W1 + none as reference
+  workflow_levels <- levels(factor(emm_df$workflow_group))
+  reference_level <- "Workflow 1 (T) + none"
+  
+  # Create contrasts comparing each level to the reference
+  contrast_list <- list()
+  for(level in workflow_levels) {
+    if(level != reference_level) {
+      contrast_name <- paste(level, "vs", reference_level)
+      contrast_list[[contrast_name]] <- c(
+        setNames(ifelse(workflow_levels == level, 1, 
+                       ifelse(workflow_levels == reference_level, -1, 0)), 
+                workflow_levels)
+      )
+    }
+  }
+  
+  # Get custom contrasts WITHOUT adjustment (we'll do global FDR correction later)
+  custom_contrasts <- contrast(emm_combined, contrast_list, adjust = "none")
+  contrast_summary <- summary(custom_contrasts, infer = TRUE)
+  contrast_df <- as.data.frame(contrast_summary)
+  
+  # Add exponentiated contrasts (these are ratios when log-transformed)
+  contrast_df$exp_estimate <- exp(contrast_df$estimate)
+  contrast_df$exp_lower <- exp(contrast_df$lower.CL)
+  contrast_df$exp_upper <- exp(contrast_df$upper.CL)
+  
+  # Calculate percentage change AND its confidence intervals
+  contrast_df$percent_change <- (contrast_df$exp_estimate - 1) * 100
+  contrast_df$percent_change_lower <- (contrast_df$exp_lower - 1) * 100
+  contrast_df$percent_change_upper <- (contrast_df$exp_upper - 1) * 100
+  
+  # Format percentage change with confidence intervals
+  contrast_df$percent_change_ci <- case_when(
+    contrast_df$percent_change > 0 ~ sprintf("+%.1f%% [+%.1f%% to +%.1f%%] ↑", 
+                                            contrast_df$percent_change, 
+                                            contrast_df$percent_change_lower, 
+                                            contrast_df$percent_change_upper),
+    contrast_df$percent_change < 0 ~ sprintf("%.1f%% [%.1f%% to %.1f%%] ↓", 
+                                            contrast_df$percent_change, 
+                                            contrast_df$percent_change_lower, 
+                                            contrast_df$percent_change_upper),
+    TRUE ~ sprintf("%.1f%% [%.1f%% to %.1f%%]", 
+                  contrast_df$percent_change, 
+                  contrast_df$percent_change_lower, 
+                  contrast_df$percent_change_upper)
+  )
+  
+  # Format ratio results
+  contrast_df$exp_ci <- sprintf("%.4f [%.4f-%.4f]", 
+                               contrast_df$exp_estimate,
+                               contrast_df$exp_lower, 
+                               contrast_df$exp_upper)
+  
+  # Add metric name
+  emm_df$metric <- metric_name
+  contrast_df$metric <- metric_name
+  
+  return(list(
+    emms = emm_df,
+    contrasts = contrast_df
+  ))
+}
+
+# Get results for all log-transformed metrics
+all_emm_results <- list()
+all_contrast_results <- list()
+
+for(metric_name in names(log_transform_models)) {
+  cat(sprintf("Processing %s...\n", metric_name))
+  
+  results <- get_comprehensive_emms(log_transform_models[[metric_name]], metric_name)
+  all_emm_results[[metric_name]] <- results$emms
+  all_contrast_results[[metric_name]] <- results$contrasts
+}
+
+# Combine all EMM results
+combined_emms <- bind_rows(all_emm_results)
+
+# Combine all contrast results
+combined_contrasts <- bind_rows(all_contrast_results)
+
+# Apply FDR correction globally across ALL comparisons
+combined_contrasts$p_value_fdr <- p.adjust(combined_contrasts$p.value, method = "BH")
+
+# Add significance based on FDR-corrected p-values
+combined_contrasts$significance_fdr <- case_when(
+  combined_contrasts$p_value_fdr < 0.001 ~ "***",
+  combined_contrasts$p_value_fdr < 0.01 ~ "**",
+  combined_contrasts$p_value_fdr < 0.05 ~ "*",
+  combined_contrasts$p_value_fdr < 0.1 ~ ".",
+  TRUE ~ ""
+)
+
+# Create a single comprehensive table combining EMMs and contrasts - CORRECTED
+create_combined_table <- function(emms_data, contrasts_data) {
+  # Get reference level
+  reference_level <- "Workflow 1 (T) + none"
+  
+  # Prepare EMMs data
+  emms_clean <- emms_data %>%
+    select(metric, workflow_group, exp_emmeans, exp_lower, exp_upper) %>%
+    mutate(
+      mean_ci = sprintf("%.4f [%.4f-%.4f]", exp_emmeans, exp_lower, exp_upper),
+      is_reference = workflow_group == reference_level
+    )
+  
+  # Prepare contrasts data - create a lookup using FORMATTED STRINGS
+  contrasts_lookup <- contrasts_data %>%
+    mutate(
+      # Extract the workflow name from contrast (remove "vs Workflow 1 (T) + none")
+      workflow_group = gsub(" vs.*", "", contrast)
+    ) %>%
+    select(metric, workflow_group, exp_estimate, exp_ci, percent_change_ci, p_value_fdr, significance_fdr)
+  
+  # Merge EMMs with contrasts
+  combined_data <- emms_clean %>%
+    left_join(contrasts_lookup, by = c("metric", "workflow_group")) %>%
+    mutate(
+      # Use the formatted percentage string directly
+      percent_diff_display = ifelse(is_reference, "Reference", percent_change_ci),
+      ratio_display = ifelse(is_reference, "-", exp_ci),
+      p_value_display = case_when(
+        is_reference ~ "-",
+        is.na(p_value_fdr) ~ "-",
+        p_value_fdr < 0.001 ~ "<0.001",
+        TRUE ~ sprintf("%.3f", p_value_fdr)
+      ),
+      significance_display = ifelse(is_reference, "", 
+                                   ifelse(is.na(significance_fdr), "", significance_fdr)),
+      # Add simple direction indicator based on ratio
+      direction_indicator = case_when(
+        is_reference ~ "",
+        is.na(exp_estimate) ~ "",
+        exp_estimate > 1 ~ "↑",
+        exp_estimate < 1 ~ "↓",
+        TRUE ~ ""
+      )
+    ) %>%
+    # Order by metric and put reference first within each metric
+    arrange(metric, desc(is_reference), workflow_group) %>%
+    select(metric, workflow_group, exp_emmeans, mean_ci, percent_diff_display, 
+           direction_indicator, p_value_display, significance_display)
+  
+  return(combined_data)
+}
+
+# Create the combined table
+combined_table_data <- create_combined_table(combined_emms, combined_contrasts)
+
+# Create the final gt table
+table3_combined <- combined_table_data %>%
+  gt(groupname_col = "metric") %>%
+  tab_header(
+    title = "Table 1: Comprehensive Workflow Comparison Analysis",
+    subtitle = "Estimated marginal means and FDR-corrected comparisons to Workflow 1 (T) + none reference"
+  ) %>%
+  cols_label(
+    workflow_group = "Workflow Group",
+    exp_emmeans = "Estimated Mean",
+    mean_ci = "Mean [95% CI]",
+    percent_diff_display = "% Difference vs Reference [95% CI]",
+    direction_indicator = "",
+    p_value_display = "FDR p-value",
+    significance_display = "Sig."
+  ) %>%
+  fmt_number(
+    columns = exp_emmeans,
+    decimals = 4
+  ) %>%
+  # Highlight reference rows
+  tab_style(
+    style = list(
+      cell_fill(color = "#f0f0f0"),
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(
+      rows = workflow_group == "Workflow 1 (T) + none"
+    )
+  ) %>%
+  # Color code the direction indicators
+  tab_style(
+    style = cell_text(color = "red"),
+    locations = cells_body(
+      columns = direction_indicator,
+      rows = direction_indicator == "↑"
+    )
+  ) %>%
+  tab_style(
+    style = cell_text(color = "green"), 
+    locations = cells_body(
+      columns = direction_indicator,
+      rows = direction_indicator == "↓"
+    )
+  ) %>%
+  # Bold significant results
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(
+      columns = c(percent_diff_display, p_value_display, significance_display),
+      rows = significance_display %in% c("*", "**", "***")
+    )
+  ) %>%
+  cols_width(
+    workflow_group ~ px(250),
+    mean_ci ~ px(180),
+    percent_diff_display ~ px(200),
+    direction_indicator ~ px(30),
+    p_value_display ~ px(100),
+    significance_display ~ px(50)
+  ) %>%
+  tab_footnote(
+    footnote = "Reference group (Workflow 1 + none) highlighted in gray",
+    locations = cells_column_labels(columns = workflow_group)
+  ) %>%
+  tab_footnote(
+    footnote = "↑ = Higher than reference, ↓ = Lower than reference",
+    locations = cells_column_labels(columns = direction_indicator)
+  ) %>%
+  tab_footnote(
+    footnote = "Significance codes: *** p<0.001, ** p<0.01, * p<0.05 (based on FDR-corrected p-values)",
+    locations = cells_column_labels(columns = significance_display)
+  ) %>%
+  tab_footnote(
+    footnote = "For metrics like NNR and workload: lower is better. For precision, recall, F-scores: higher is better.",
+    locations = cells_column_labels(columns = percent_diff_display)
+  ) %>%
+  tab_footnote(
+    footnote = "FDR correction applied globally across all comparisons using Benjamini-Hochberg procedure",
+    locations = cells_column_labels(columns = p_value_display)
+  )
+# Display the combined table
+table3_combined
+
+```
+
+
+
+#Within Workflow Comparisons (Vector Search)
+```{r}
+vs_comparison_r <- read.csv("vs_comparison.csv")
+vs_comparison_r_positive_nnr <- vs_comparison_r %>% 
+  filter(nnr > 0) %>%
+  mutate(vector_search_type = relevel(factor(vector_search_type, levels = c("none", "zero-shot", "one-shot", "few-shot")), ref = "none"))
+
+vs_comparison_r
+```
+
+
+```{r}
+# Function to model log-transformed NNR with lmer
+run_lognormal_models <- function(filtered_data, db_name, metric) {
+  # Create log-transformed NNR if it doesn't exist
+  if(!"log_nnr" %in% names(filtered_data)) {
+    filtered_data$log_nnr <- log(filtered_data$nnr)
+  }
+  formula_str <- paste0(metric, " ~ vector_search_type + (1|database) + (vector_search_type|standardised_question_id)")
+  model_formula <- as.formula(formula_str)
+  
+  # Print info
+  cat(sprintf('Modeling %s with linear mixed model\n', metric))
+  
+  # Ensure vector_search_type is a factor with the baseline as reference
+  if(!is.factor(filtered_data$vector_search_type)) {
+    filtered_data$vector_search_type <- factor(filtered_data$vector_search_type)
+  }
+  
+  # Fit model
+  model <- lmer(model_formula, data = filtered_data, REML = TRUE)
+  model_summary <- summary(model)
+  
+  # Extract coefficients
+  coefs <- as.data.frame(model_summary$coefficients)
+  
+  # Add exponentiated coefficients for easier interpretation
+  # These represent multiplicative effects on NNR
+  coefs$multiplicative_effect <- exp(coefs$Estimate)
+  coefs$percentage_change <- (exp(coefs$Estimate) - 1) * 100
+  
+  # Print results
+  cat(sprintf("\nLog-NNR Model Results for %s:\n", db_name))
+  print(model_summary)
+  
+  # Create DHARMa residuals
+  sim_residuals <- simulateResiduals(model)
+  
+  # Plot diagnostics
+  par(mfrow = c(1, 1))
+  par(oma = c(0, 0, 2, 0))
+  plot(sim_residuals)
+  title(main = "DHARMa Residual Diagnostics for log-NNR model", outer = TRUE)
+  
+  # Residuals vs. fitted plot
+  par(mfrow = c(1, 1))
+  plot(fitted(model), resid(model), 
+       xlab = "Fitted values", 
+       ylab = "Residuals",
+       main = "Traditional Residuals vs. Fitted Values for log-NNR model")
+  abline(h = 0, col = "red", lty = 2)
+  
+  return(list(
+    model = model_summary,
+    results = coefs,
+    residuals = sim_residuals,
+    fitted_model = model,
+    model_type = "lognormal"
+  ))
+}
+
+# Usage:
+vs_comparison_models <- run_lognormal_models(vs_comparison_r_positive_nnr, "all", metric = 'log_nnr')
+fit_model <- vs_comparison_models$fitted_model
+# Quick ICC extraction
+var_comps <- as.data.frame(VarCorr(fit_model))
+total_var <- sum(var_comps$vcov)
+
+question_icc <- sum(var_comps[var_comps$grp == "standardised_question_id", "vcov"]) / total_var
+database_icc <- var_comps[var_comps$grp == "database", "vcov"] / total_var
+
+cat("Question ICC:", round(question_icc, 3), "\n")
+cat("Database ICC:", round(database_icc, 3), "\n")
+```
+
+
+
+```{r}
+library(reshape2)
+# Extract correlation matrix
+vs_comparison_re <- VarCorr(vs_comparison_models$fitted_model)
+corr_matrix <- as.matrix(attr(vs_comparison_re$standardised_question_id, 'correlation'))
+
+# Define labels mapping
+desired_order_strings <- c(
+  "(Intercept)",
+  "vector_search_typezero-shot",
+  "vector_search_typeone-shot",
+  "vector_search_typefew-shot"
+)
+display_labels <- c("Baseline", "Zero-Shot", "One-Shot", "Few-Shot")
+
+# Create a properly labeled correlation matrix
+labeled_corr <- corr_matrix
+rownames(labeled_corr) <- display_labels
+colnames(labeled_corr) <- display_labels
+#create sparse diagonal matrix heatmap thing 
+lower_tri <- labeled_corr
+lower_tri[lower.tri(lower_tri)] <- NA
+corr_df <- melt(lower_tri, na.rm = TRUE)
+corr_df$Var2 <- factor(corr_df$Var2, levels = rev(display_labels))
+
+
+# Create the plot
+ggplot(corr_df, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", value)), 
+            color = "white", size = 4) +
+  scale_fill_gradient2(low = "#4575b4", mid = "white", high = "#d73027", 
+                      midpoint = 0, limits = c(-1, 1)) +
+  labs(title = "Between-Topic Random Slope Correlations \n by Vector Search Scenario",
+       x = "", y = "") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 14),
+    plot.subtitle = element_text(size = 10),
+    panel.grid = element_blank(),
+  ) +
+  coord_fixed()
+```
+# WITHIN WORKFLOW COPARISONS - EMM and BASELINE COMPARISONS 
+```{r}
+create_main_results_table <- function(fitted_model, reference_level = "none") {
+  
+  # Get EMMs and pairwise comparisons
+  emm_obj <- emmeans(fitted_model, ~ vector_search_type)
+  emmeans_summary <- summary(emm_obj, infer = TRUE)
+  emmeans_df <- as.data.frame(emmeans_summary)
+  
+  pairs_result <- pairs(emm_obj, adjust = "fdr")
+  pairs_summary <- summary(pairs_result, infer = TRUE)  # Add infer = TRUE for CIs
+  pairs_df <- as.data.frame(pairs_summary)
+  pairs_df$contrast_clean <- gsub("[()]", "", pairs_df$contrast)
+  
+  # Transform EMMs
+  emmeans_df$exp_emmean <- exp(emmeans_df$emmean)
+  emmeans_df$exp_lower <- exp(emmeans_df$lower.CL)
+  emmeans_df$exp_upper <- exp(emmeans_df$upper.CL)
+  
+  # Get reference value
+  ref_value <- emmeans_df %>% 
+    filter(vector_search_type == reference_level) %>% 
+    pull(exp_emmean)
+  
+  # Create main results table
+  results_table <- emmeans_df %>%
+    mutate(
+      # Format estimated mean with CI
+      estimated_mean_ci = sprintf("%.2f [%.2f-%.2f]", exp_emmean, exp_lower, exp_upper),
+      
+      # Calculate percent difference from reference (point estimate)
+      pct_diff = ifelse(vector_search_type == reference_level, 
+                       NA, 
+                       ((exp_emmean - ref_value) / ref_value) * 100),
+      
+      # Create workflow group labels
+      workflow_group = case_when(
+        vector_search_type == "none" ~ "Workflow 4 (O+TVS) + none",
+        vector_search_type == "zero-shot" ~ "Workflow 4 (O+TVS) + zero-shot", 
+        vector_search_type == "one-shot" ~ "Workflow 4 (O+TVS) + one-shot",
+        vector_search_type == "few-shot" ~ "Workflow 4 (O+TVS) + few-shot",
+        TRUE ~ as.character(vector_search_type)
+      )
+    )
+  
+  # Add p-values AND confidence intervals from pairwise comparisons
+  for(i in 1:nrow(results_table)) {
+    if(results_table$vector_search_type[i] != reference_level) {
+      # Find corresponding pairwise comparison
+      comparison_pattern <- paste(results_table$vector_search_type[i], reference_level, sep = " - ")
+      reverse_pattern <- paste(reference_level, results_table$vector_search_type[i], sep = " - ")
+      
+      pair_row <- pairs_df %>%
+        filter(contrast_clean == comparison_pattern | contrast_clean == reverse_pattern)
+      
+      if(nrow(pair_row) > 0) {
+        # Get p-value
+        results_table$adj_p_value[i] <- pair_row$p.value[1]
+        results_table$significance[i] <- case_when(
+          pair_row$p.value[1] < 0.001 ~ "***",
+          pair_row$p.value[1] < 0.01 ~ "**", 
+          pair_row$p.value[1] < 0.05 ~ "*",
+          TRUE ~ ""
+        )
+        
+        # Calculate percentage difference with CI from contrasts
+        # Contrasts are on log scale, so exp() gives us ratios
+        ratio_estimate <- exp(pair_row$estimate[1])
+        ratio_lower <- exp(pair_row$lower.CL[1])
+        ratio_upper <- exp(pair_row$upper.CL[1])
+        
+        # If the contrast is reversed, flip the ratios
+        if(pair_row$contrast_clean[1] == reverse_pattern) {
+          ratio_estimate <- 1/ratio_estimate
+          temp_lower <- 1/ratio_upper
+          ratio_upper <- 1/ratio_lower
+          ratio_lower <- temp_lower
+        }
+        
+        # Convert ratios to percentage differences
+        pct_diff_est <- (ratio_estimate - 1) * 100
+        pct_diff_lower <- (ratio_lower - 1) * 100
+        pct_diff_upper <- (ratio_upper - 1) * 100
+        
+        # Format percentage difference with CI (no directional arrows)
+        results_table$pct_diff_formatted[i] <- case_when(
+          pct_diff_est > 0 ~ sprintf("+%.0f%% [%+.0f%% to %+.0f%%]", 
+                                    pct_diff_est, pct_diff_lower, pct_diff_upper),
+          pct_diff_est < 0 ~ sprintf("%.0f%% [%.0f%% to %.0f%%]", 
+                                    pct_diff_est, pct_diff_lower, pct_diff_upper),
+          TRUE ~ sprintf("%.0f%% [%.0f%% to %.0f%%]", 
+                        pct_diff_est, pct_diff_lower, pct_diff_upper)
+        )
+        
+      } else {
+        results_table$adj_p_value[i] <- NA
+        results_table$significance[i] <- ""
+        results_table$pct_diff_formatted[i] <- "No comparison available"
+      }
+    } else {
+      results_table$adj_p_value[i] <- NA
+      results_table$significance[i] <- "-"
+      results_table$pct_diff_formatted[i] <- "Reference"
+    }
+  }
+  
+  # Format p-values
+  results_table$p_formatted <- ifelse(is.na(results_table$adj_p_value), 
+                                     "-", 
+                                     sprintf("%.3f", results_table$adj_p_value))
+  
+  return(results_table)
+}
+
+# Create both tables
+main_results <- create_main_results_table(vs_comparison_models$fitted_model)
+
+# TABLE 1: Main Results (matching your Table 3 format exactly)
+main_display <- main_results %>%
+  select(
+    "Workflow Group" = workflow_group,
+    "Estimated Mean¹ [95% CI]" = estimated_mean_ci,
+    "% Difference vs Reference² [95% CI]" = pct_diff_formatted,  # Updated column name
+    "Adjusted p-value⁴" = p_formatted,
+    "Sig.⁵" = significance
+  )
+
+# Display Table 1
+vector_search_withinworkflow_table1 <- main_display %>%
+  gt() %>%
+  tab_header(
+    title = "Within-Workflow Performance Comparisons (Vector Search Types)",
+    subtitle = "Number Needed to Read (NNR) - Mixed Effects Model Results"
+  ) %>%
+  tab_spanner(
+    label = "Performance Metrics",
+    columns = c("Estimated Mean¹ [95% CI]", "% Difference vs Reference² [95% CI]", "Adjusted p-value⁴", "Sig.⁵")
+  ) %>%
+  # Style reference row
+  tab_style(
+    style = list(
+      cell_text(weight = "bold"),
+      cell_fill(color = "#f8f9fa")
+    ),
+    locations = cells_body(
+      rows = `% Difference vs Reference² [95% CI]` == "Reference"
+    )
+  ) %>%
+  # Highlight significant results
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(
+      columns = c("Estimated Mean¹ [95% CI]", "% Difference vs Reference² [95% CI]", "Adjusted p-value⁴", "Sig.⁵"),
+      rows = `Sig.⁵` %in% c("*", "**", "***")
+    )
+  ) %>%
+  # Adjust column widths
+  cols_width(
+    `Workflow Group` ~ px(250),
+    `Estimated Mean¹ [95% CI]` ~ px(150),
+    `% Difference vs Reference² [95% CI]` ~ px(200),  # Adjusted for no arrows
+    `Adjusted p-value⁴` ~ px(100),
+    `Sig.⁵` ~ px(50)
+  ) %>%
+  # Add footnotes
+  tab_footnote(
+    footnote = "Mean estimated via mixed effects model: log(nnr) ~ vector_search_type + (1|database) + (vector_search_type|standardised_question_id). Model outputs exponentiated (back-transformed).",
+    locations = cells_column_labels(columns = "Estimated Mean¹ [95% CI]")
+  ) %>%
+  tab_footnote(
+    footnote = "Percentage change calculated from contrast ratios: ((Ratio - 1) × 100). Confidence intervals derived from contrast CIs. Negative values indicate improvement (lower NNR).",
+    locations = cells_column_labels(columns = "% Difference vs Reference² [95% CI]")
+  ) %>%
+  tab_footnote(
+    footnote = "p-values adjusted using Benjamini-Hochberg procedure to control false discovery rate",
+    locations = cells_column_labels(columns = "Adjusted p-value⁴")
+  ) %>%
+  tab_footnote(
+    footnote = "Significance codes: *** p<0.001, ** p<0.01, * p<0.05",
+    locations = cells_column_labels(columns = "Sig.⁵")
+  ) %>%
+  tab_source_note(
+    source_note = "Lower NNR values indicate better performance (fewer documents needed to find one relevant result)"
+  )
+
+# Display the table
+vector_search_withinworkflow_table1
+```
+# WITHIN WORKFLOW COMPARISONS - PRIOR KNOWLEDGE COMPARISONS (SUPP) - describe qualitiatvely with ref to SUPP
+```{r}
+create_within_workflow_table_with_percentages <- function(fitted_model, reference_level = "none") {
+  
+  # Get pairwise comparisons
+  emm_obj <- emmeans(fitted_model, ~ vector_search_type)
+  pairs_result <- pairs(emm_obj, adjust = "fdr")
+  pairs_summary <- summary(pairs_result)
+  pairs_df <- as.data.frame(pairs_summary)
+  pairs_df$contrast_clean <- gsub("[()]", "", pairs_df$contrast)
+  
+  # Filter for within-workflow comparisons only (exclude baseline)
+  within_workflow <- pairs_df %>%
+    filter(!grepl(paste0("\\b", reference_level, "\\b"), contrast_clean)) %>%
+    mutate(
+      # Calculate ratios and CIs
+      exp_ratio = exp(estimate),
+      exp_ratio_lower = exp(estimate - 1.96 * SE),
+      exp_ratio_upper = exp(estimate + 1.96 * SE),
+      exp_ratio_ci = sprintf("%.3f [%.3f-%.3f]", exp_ratio, exp_ratio_lower, exp_ratio_upper),
+      
+      # Calculate percentage differences and CIs
+      pct_diff = (exp_ratio - 1) * 100,
+      pct_diff_lower = (exp_ratio_lower - 1) * 100,
+      pct_diff_upper = (exp_ratio_upper - 1) * 100,
+      
+      # Format percentage differences with direction arrows
+      pct_diff_formatted = case_when(
+        pct_diff > 0 ~ sprintf("+%.0f%% [+%.0f%% to +%.0f%%] ↑", pct_diff, pct_diff_lower, pct_diff_upper),
+        pct_diff < 0 ~ sprintf("%.0f%% [%.0f%% to %.0f%%] ↓", pct_diff, pct_diff_lower, pct_diff_upper),
+        TRUE ~ sprintf("%.0f%% [%.0f%% to %.0f%%]", pct_diff, pct_diff_lower, pct_diff_upper)
+      ),
+      
+      # Format p-values and significance
+      p_formatted = sprintf("%.3f", p.value),
+      significance = case_when(
+        p.value < 0.001 ~ "***",
+        p.value < 0.01 ~ "**",
+        p.value < 0.05 ~ "*",
+        TRUE ~ ""
+      ),
+      
+      # Clean up contrast names for display
+      comparison_clean = gsub(" - ", " vs ", contrast_clean)
+    ) %>%
+    select(
+      "Pairwise Comparison" = comparison_clean,
+      "Ratio (eβ) [95% CI]" = exp_ratio_ci,
+      "% Difference¹ [95% CI]" = pct_diff_formatted,
+      "Adjusted p-value²" = p_formatted,
+      "Sig." = significance
+    )
+  
+  return(within_workflow)
+}
+
+# Create Table 2 with percentage differences
+within_workflow_table_enhanced <- create_within_workflow_table_with_percentages(vs_comparison_models$fitted_model)
+
+# Display enhanced Table 2
+withinworkflow_table2 <- within_workflow_table_enhanced %>%
+  gt() %>%
+  tab_header(
+    title = "Within-Workflow Comparisons: Vector Search Methods",
+    subtitle = "Pairwise Comparisons Between Vector Search Types"
+  ) %>%
+  tab_spanner(
+    label = "Effect Size Metrics",
+    columns = c("Ratio (eβ) [95% CI]", "% Difference¹ [95% CI]")
+  ) %>%
+  tab_spanner(
+    label = "Statistical Significance",
+    columns = c("Adjusted p-value²", "Sig.")
+  ) %>%
+  # Highlight significant results
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(
+      columns = c("Ratio (eβ) [95% CI]", "% Difference¹ [95% CI]", "Adjusted p-value²", "Sig."),
+      rows = `Sig.` %in% c("*", "**", "***")
+    )
+  ) %>%
+  # Add footnotes
+  tab_footnote(
+    footnote = "Percentage difference calculated as: (ratio - 1) × 100. Positive values indicate the first method requires more documents (worse performance) than the second method. Negative values indicate better performance.",
+    locations = cells_column_labels(columns = "% Difference¹ [95% CI]")
+  ) %>%
+  tab_footnote(
+    footnote = "p-values adjusted using Benjamini-Hochberg procedure to control false discovery rate",
+    locations = cells_column_labels(columns = "Adjusted p-value²")
+  ) %>%
+  tab_source_note(
+    source_note = "Comparisons between vector search methods only (baseline excluded). Percentage differences provide more intuitive interpretation of effect sizes than ratios."
+  )
+
+withinworkflow_table2
+```
+
+
+
+```{r}
+citation(package = 'emmeans')
+```
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
