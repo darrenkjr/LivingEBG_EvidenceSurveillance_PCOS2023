@@ -122,7 +122,7 @@ In instances with no sudo access, or you would simply like to install in your us
    pixi run python -c "from sqlalchemy import create_engine; import os; from dotenv import load_dotenv; load_dotenv('src/.env'); engine = create_engine(f'postgresql://{os.getenv(\"DB_USER\")}:{os.getenv(\"DB_PWD\")}@{os.getenv(\"DB_HOST\")}:{os.getenv(\"DB_PORT\")}/{os.getenv(\"DB_NAME\")}'); print('Database connection successful')"
    ```
 
-### 2. Run Experiments
+### 2. Run Experiments (if Regenerating Results - Otherwise Skip to Step 4) 
 
 The project includes three main experimental pipelines:
 
