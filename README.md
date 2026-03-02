@@ -184,9 +184,9 @@ Running analysis.py recomputes the descriptive statistics and writes the followi
 We need these files for the next step. 
 
 #### 4.3 Linear modelling (R / RStudio)
-Open analysis/analysis.Rmd in RStudio.
-Install any required R packages listed at the top of the Rmd.
-Knit or run the document.
+* Open analysis/analysis.Rmd in RStudio.
+* Install any required R packages listed at the top of the Rmd.
+* Run the code as normal
 
 
 ## Getting Help
