@@ -43,3 +43,7 @@ src/search_results/
 
 #marimo 
 analysis/__marimo__/
+
+#analysis files - run analysis.py to regenerate
+analysis/vs_comparison.csv
+analysis/topic_comparison.parquet
