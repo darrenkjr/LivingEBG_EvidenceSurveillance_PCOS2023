@@ -1,6 +1,6 @@
 # Single Database Evidence Retrieval Workflows for Living Guideline Development and Maintenance
 
-This repository contains code necessary to replicate experiments and analyses necessary for the paper: Automated Evidence Surveillance with AI-Enabled Pre-Ranking in Living Evidence-Based Guideline Maintenance: A Simulation Study
+This repository contains code necessary to replicate experiments and analyses necessary for the paper: **Automated Evidence Surveillance with AI-Enabled Pre-Ranking with Cutoff in Living Evidence-Based Guideline Maintenance: A Simulation Study**
 
 ## Overview
 
