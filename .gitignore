@@ -40,4 +40,6 @@ src/search_results/
 # Alternate Data Stream Identifiers
 *:Zone.Identifier
 
-# 
+
+#marimo 
+analysis/__marimo__/
