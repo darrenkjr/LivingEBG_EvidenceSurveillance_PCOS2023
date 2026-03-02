@@ -163,7 +163,11 @@ Results are saved to:
   - `analysis/dataset/groundtruth_eval.parquet`
   - `analysis/dataset/overall_evalmetrics_df_analysis.xlsx`
 
-These files are versioned in the repository (via Git LFS), so you do not need to regenerate them to reproduce the analysis. 
+These files are versioned in the repository (via Git LFS), so you do not need to regenerate them to reproduce the analysis. However, make sure you've run 
+```bash
+git lfs pull
+```
+to ensure results are properly downloaded locally. 
 
 #### 4.2 Descriptive analyses (Python / marimo)
 
