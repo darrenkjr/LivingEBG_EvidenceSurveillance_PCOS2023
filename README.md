@@ -1,6 +1,6 @@
 # Single Database Evidence Retrieval Workflows for Living Guideline Development and Maintenance
 
-This repository contains code necessary to replicate experiments and analyses necessary for the paper: Automated Evidence Surveillance with AI-Enabled Ranking in Living Evidence-Based Guideline Maintenance: A Simulation Study
+This repository contains code necessary to replicate experiments and analyses necessary for the paper: Automated Evidence Surveillance with AI-Enabled Pre-Ranking in Living Evidence-Based Guideline Maintenance: A Simulation Study
 
 ## Overview
 
@@ -152,11 +152,49 @@ pixi run python main_vectorsearch.py
 Results are saved to:
 - `src/evaluation_results/overall/overall_evalmetrics_df.xlsx`
 
+### 4. Analysis 
+
+#### 4.1 Data and results locations
+
+- **Consolidated overall search results**: `src/consolidated_results/`
+- **Analysis inputs** (used by `analysis/analysis.py`):
+  - `analysis/dataset/PCOS_Guideline_Dataset_srtype.xlsm`
+  - `analysis/dataset/fullgroundtruth_valid_apimerge_df.parquet`
+  - `analysis/dataset/groundtruth_eval.parquet`
+  - `analysis/dataset/overall_evalmetrics_df_analysis.xlsx`
+
+These files are versioned in the repository (via Git LFS), so you do not need to regenerate them to reproduce the analysis. 
+
+#### 4.2 Descriptive analyses (Python / marimo)
+
+From the project root:
+
+```bash
+pixi install --environment cpu    # or --environment gpu
+git lfs pull                      # ensure large data files are present
+
+cd analysis
+pixi run marimo run analysis.py
+```
+
+Running analysis.py recomputes the descriptive statistics and writes the following outputs to analysis/:
+* topic_comparison.parquet
+* vs_comparison.csv
+
+We need these files for the next step. 
+
+#### 4.3 Linear modelling (R / RStudio)
+Open analysis/analysis.Rmd in RStudio.
+Install any required R packages listed at the top of the Rmd.
+Knit or run the document.
+
+
 ## Getting Help
 
 If you encounter any issues or have questions about running the experiments, please:
 - Open an issue on the GitHub repository
-- Contact the maintainer directly
+
+
 
 ## License
 
