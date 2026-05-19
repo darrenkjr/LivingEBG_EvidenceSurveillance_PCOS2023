@@ -1,6 +1,6 @@
 # Single Database Evidence Retrieval Workflows for Living Guideline Development and Maintenance
 
-This repository contains code necessary to replicate experiments and analyses necessary for the paper: Automated Evidence Surveillance with AI-Enabled Pre-Ranking in Living Evidence-Based Guideline Maintenance: A Simulation Study
+This repository contains code necessary to replicate experiments and analyses necessary for the paper: **Automated Evidence Surveillance with AI-Enabled Pre-Ranking with Cutoff in Living Evidence-Based Guideline Maintenance: A Simulation Study**
 
 ## Overview
 
@@ -122,7 +122,7 @@ In instances with no sudo access, or you would simply like to install in your us
    pixi run python -c "from sqlalchemy import create_engine; import os; from dotenv import load_dotenv; load_dotenv('src/.env'); engine = create_engine(f'postgresql://{os.getenv(\"DB_USER\")}:{os.getenv(\"DB_PWD\")}@{os.getenv(\"DB_HOST\")}:{os.getenv(\"DB_PORT\")}/{os.getenv(\"DB_NAME\")}'); print('Database connection successful')"
    ```
 
-### 2. Run Experiments
+### 2. Run Experiments (if Regenerating Results - Otherwise Skip to Step 4) 
 
 The project includes three main experimental pipelines:
 
@@ -163,7 +163,11 @@ Results are saved to:
   - `analysis/dataset/groundtruth_eval.parquet`
   - `analysis/dataset/overall_evalmetrics_df_analysis.xlsx`
 
-These files are versioned in the repository (via Git LFS), so you do not need to regenerate them to reproduce the analysis. 
+These files are versioned in the repository (via Git LFS), so you do not need to regenerate them to reproduce the analysis. However, make sure you've run 
+```bash
+git lfs pull
+```
+to ensure results are properly downloaded locally. 
 
 #### 4.2 Descriptive analyses (Python / marimo)
 
